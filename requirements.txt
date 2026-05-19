@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-jose[cryptography]
+passlib[bcrypt]
+httpx
+supabase
+python-multipart
+google-genai
+qrcode[pil]
+Pillow
+slowapi
+python-dotenv
+pydantic-settings
+cryptography
