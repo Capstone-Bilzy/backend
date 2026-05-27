@@ -67,3 +67,37 @@ async def get_qr(settlement_id: str, current_user=Depends(get_current_user)):
 @router.post("/{settlement_id}/join")
 async def join(settlement_id: str, body: AddMemberRequest, current_user=Depends(get_current_user)):
     return await qr_service.join_by_qr(settlement_id, body.nickname, current_user["id"])
+
+
+from pydantic import BaseModel, Field
+
+class AdjustAmountRequest(BaseModel):
+    amount: int = Field(gt=0, lt=10_000_000)
+
+
+# 참여자별 금액 수동 조정 (amountAdjust1/2 화면)
+@router.patch("/{settlement_id}/members/{member_id}/amount")
+async def adjust_amount(
+    settlement_id: str,
+    member_id: str,
+    body: AdjustAmountRequest,
+    current_user=Depends(get_current_user)
+):
+    from core.database import supabase_admin
+    from fastapi import HTTPException
+
+    # 방장만 조정 가능
+    settlement = supabase_admin.table("settlements") \
+        .select("id").eq("id", settlement_id).eq("created_by", current_user["id"]).execute()
+    if not settlement.data:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+
+    result = supabase_admin.table("settlement_members").update({
+        "amount": body.amount
+    }).eq("id", member_id).eq("settlement_id", settlement_id).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="참여자를 찾을 수 없습니다")
+
+    return result.data[0]
+
