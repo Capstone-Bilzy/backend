@@ -47,6 +47,9 @@ class SettlementStatus(str, Enum):
 class CreateSettlementRequest(BaseModel):
     title: str = Field(min_length=1, max_length=50)
 
+class UpdateSettlementRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=50)
+
 class UpdateStatusRequest(BaseModel):
     status: SettlementStatus
 

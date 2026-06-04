@@ -37,7 +37,7 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
     """Gemini Vision으로 영수증 OCR + 파싱 한 번에"""
     try:
         response = _client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 OCR_PROMPT,

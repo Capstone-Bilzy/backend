@@ -72,6 +72,14 @@ async def update_status(settlement_id: str, status: str, user_id: str) -> dict:
     return result.data[0]
 
 
+async def update_settlement(settlement_id: str, title: str, user_id: str) -> dict:
+    _check_owner(settlement_id, user_id)
+
+    result = supabase_admin.table("settlements") \
+        .update({"title": title}).eq("id", settlement_id).execute()
+    return result.data[0]
+
+
 async def delete_settlement(settlement_id: str, user_id: str):
     _check_owner(settlement_id, user_id)
 

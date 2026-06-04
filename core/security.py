@@ -3,7 +3,7 @@ from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from core.config import settings
-from core.database import supabase
+from core.database import supabase_admin
 import logging
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
     # 보안 로그: 요청 기록
     logger.info(f"AUTH user={user_id[:8]}***")
 
-    result = supabase.table("users").select("*").eq("id", user_id).single().execute()
+    result = supabase_admin.table("users").select("*").eq("id", user_id).single().execute()
     if not result.data:
         raise HTTPException(status_code=401, detail="유저를 찾을 수 없습니다")
 

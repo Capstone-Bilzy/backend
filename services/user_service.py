@@ -75,10 +75,22 @@ async def get_history(user_id: str, request=None) -> list:
     await log_access(user_id, "READ", "history", None,
                      request.client.host if request else None)
     result = supabase_admin.table("history") \
-        .select("*, settlements(id, title, total_amount, status, created_at)") \
+        .select("*, settlements(id, title, total_amount, status, created_at, settlement_members(count))") \
         .eq("user_id", user_id) \
         .order("created_at", desc=True) \
         .execute()
+
+    # settlement_members(count) → member_count 평탄화
+    for row in result.data:
+        s = row.get("settlements")
+        if s:
+            members = s.pop("settlement_members", None)
+            count = 0
+            if isinstance(members, list) and members:
+                count = members[0].get("count", 0)
+            elif isinstance(members, dict):
+                count = members.get("count", 0)
+            s["member_count"] = count
     return result.data
 
 

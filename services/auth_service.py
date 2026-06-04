@@ -89,7 +89,8 @@ async def social_login(provider: str, access_token: str) -> dict:
 
     # 5. Refresh token DB 저장 (탈취 시 무효화 가능)
     supabase_admin.table("refresh_tokens").upsert(
-        {"user_id": user_id, "token": refresh}
+        {"user_id": user_id, "token": refresh},
+        on_conflict="user_id"
     ).execute()
 
     logger.info(f"SOCIAL_LOGIN provider={provider} user={user_id[:8]}***")

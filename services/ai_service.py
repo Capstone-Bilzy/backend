@@ -74,7 +74,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 
     try:
         response = _client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
         raw = response.text.strip()

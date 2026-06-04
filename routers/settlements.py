@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Response
-from models.schemas import CreateSettlementRequest, UpdateStatusRequest, AddMemberRequest, CalculateRequest
+from models.schemas import CreateSettlementRequest, UpdateSettlementRequest, UpdateStatusRequest, AddMemberRequest, CalculateRequest
 from services import settlement_service, ai_service, qr_service
 from core.security import get_current_user
 
@@ -19,6 +19,11 @@ async def get(settlement_id: str, current_user=Depends(get_current_user)):
 @router.patch("/{settlement_id}/status")
 async def update_status(settlement_id: str, body: UpdateStatusRequest, current_user=Depends(get_current_user)):
     return await settlement_service.update_status(settlement_id, body.status, current_user["id"])
+
+
+@router.patch("/{settlement_id}")
+async def update(settlement_id: str, body: UpdateSettlementRequest, current_user=Depends(get_current_user)):
+    return await settlement_service.update_settlement(settlement_id, body.title, current_user["id"])
 
 
 @router.delete("/{settlement_id}")
