@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 from core.database import supabase_admin
+from core.storage import signed_receipt_url
 import logging
 
 logger = logging.getLogger(__name__)
@@ -57,8 +58,10 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
     items = supabase_admin.table("receipt_items") \
         .select("*").eq("settlement_id", settlement_id).execute()
 
+    # 영수증 이미지는 private 버킷 — 멤버에게만 단기 signed URL 발급
     return {
         **settlement,
+        "receipt_image_url": signed_receipt_url(settlement.get("receipt_image_url")),
         "members": members.data,
         "items": items.data
     }

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, Request
 from models.schemas import CreateSettlementRequest, UpdateSettlementRequest, UpdateStatusRequest, AddMemberRequest, CalculateRequest
 from services import settlement_service, ai_service, qr_service
 from core.security import get_current_user
+from core.limiter import limiter
 
 router = APIRouter(prefix="/settlements", tags=["정산방"])
 
@@ -48,7 +49,8 @@ async def remove_member(settlement_id: str, member_user_id: str, current_user=De
 
 # AI 정산
 @router.post("/{settlement_id}/calculate")
-async def calculate(settlement_id: str, body: CalculateRequest, current_user=Depends(get_current_user)):
+@limiter.limit("10/minute")  # Gemini 텍스트 호출 — 비용 발생, 남용 차단
+async def calculate(request: Request, settlement_id: str, body: CalculateRequest, current_user=Depends(get_current_user)):
     return await ai_service.calculate_split(settlement_id, body.ai_note, current_user["id"])
 
 

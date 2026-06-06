@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from core.limiter import limiter
 from core.config import settings
 from routers import auth, ocr, settlements, users
 from routers import account_router, receipts_router  # ← 한 줄로 합치기
@@ -12,8 +12,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
-
-limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="Bilzy API",
@@ -28,7 +26,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["bilzy://"] if not settings.DEBUG else ["*"],
-    allow_credentials=True,
+    # 모바일 클라이언트는 Authorization(Bearer) 헤더로 인증 — 쿠키 자격증명 불필요.
+    # credentials=False면 와일드카드 origin과 함께여도 크리덴셜 교차출처 읽기 위험이 없다.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

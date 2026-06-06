@@ -3,6 +3,8 @@ from google.genai import types
 from fastapi import HTTPException, UploadFile
 from core.database import supabase_admin
 from core.config import settings
+from core.storage import signed_receipt_url
+from core.image_validation import verify_image
 import uuid, json
 import logging
 
@@ -76,6 +78,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
     contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
+    verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
 
     # 2. 정산방 소유자 확인 (IDOR 방어)
     settlement = supabase_admin.table("settlements") \
@@ -86,12 +89,12 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
     # 3. Gemini Vision으로 OCR
     ocr_result = await scan_with_gemini(contents, file.content_type)
 
-    # 4. Supabase Storage에 저장 (처리 후에도 사용자가 확인할 수 있게 임시 보관)
+    # 4. Supabase Storage(private 버킷)에 저장 — 공개 URL이 아닌 in-bucket 경로만 DB에 보관.
+    #    조회 시 settlement_service가 멤버에게만 단기 signed URL을 발급한다.
     file_path = f"receipts/{settlement_id}/{uuid.uuid4()}.jpg"
     supabase_admin.storage.from_("receipts").upload(
         file_path, contents, {"content-type": file.content_type}
     )
-    image_url = supabase_admin.storage.from_("receipts").get_public_url(file_path)
 
     # 5. OCR 결과 DB 저장
     total = ocr_result.get("total", sum(
@@ -99,7 +102,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
     ))
 
     supabase_admin.table("settlements").update({
-        "receipt_image_url": image_url,
+        "receipt_image_url": file_path,
         "total_amount": total,
         "status": "scanning"
     }).eq("id", settlement_id).execute()
@@ -121,7 +124,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
 
     return {
         "settlement_id": settlement_id,
-        "image_url": image_url,
+        "image_url": signed_receipt_url(file_path),
         "items": ocr_result.get("items", []),
         "total": total,
         "message": "OCR 결과를 확인하고 수정해주세요"

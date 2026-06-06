@@ -12,10 +12,9 @@ except ImportError:
 
 
 async def generate_qr(settlement_id: str, user_id: str) -> bytes:
-    settlement = supabase_admin.table("settlements") \
-        .select("id, status").eq("id", settlement_id).execute()
-    if not settlement.data:
-        raise HTTPException(status_code=404, detail="정산방을 찾을 수 없습니다")
+    # 초대 QR은 방장만 발급할 수 있게 제한(IDOR 방어).
+    from services.settlement_service import _check_owner
+    _check_owner(settlement_id, user_id)
 
     deep_link = f"bilzy://join/{settlement_id}"
 
