@@ -70,6 +70,23 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
         raise HTTPException(status_code=500, detail="OCR 처리 중 오류가 발생했습니다")
 
 
+async def scan_only(file: UploadFile) -> dict:
+    """정산방과 무관한 독립 OCR. 보관함 저장 전 금액 프리필용으로 items/total만 반환(저장 없음)."""
+    if file.content_type not in ALLOWED_MIME:
+        raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
+
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
+    verify_image(contents)  # content-type 헤더 위조 방어
+
+    ocr_result = await scan_with_gemini(contents, file.content_type)
+    total = ocr_result.get("total", sum(
+        i["price"] * i["quantity"] for i in ocr_result.get("items", [])
+    ))
+    return {"items": ocr_result.get("items", []), "total": total}
+
+
 async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) -> dict:
     # 1. 입력 검증
     if file.content_type not in ALLOWED_MIME:

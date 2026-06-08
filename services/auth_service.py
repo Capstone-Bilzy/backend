@@ -2,7 +2,7 @@ import httpx
 from fastapi import HTTPException
 from core.database import supabase_admin
 from core.security import create_access_token, create_refresh_token
-from core.privacy import encrypt_user, decrypt_user, pseudonymize
+from core.privacy import encrypt_user, decrypt_user, pseudonymize, encrypt
 import logging
 from datetime import datetime
 
@@ -20,10 +20,12 @@ async def get_kakao_user_info(access_token: str) -> dict:
 
     data = res.json()
     profile = data.get("kakao_account", {}).get("profile", {})
+    # 닉네임/프로필 미동의 시 카카오는 해당 키를 아예 주지 않는다 → None 으로 둬서
+    # "사용자" 폴백을 DB에 쓰지 않고, 기존에 받아둔 실명을 보존한다(social_login에서 조건부 갱신).
     return {
         "id": str(data["id"]),
-        "nickname": profile.get("nickname", "사용자"),
-        "profile_image_url": profile.get("profile_image_url", "")
+        "nickname": profile.get("nickname") or None,
+        "profile_image_url": profile.get("profile_image_url") or None
     }
 
 
@@ -39,8 +41,8 @@ async def get_naver_user_info(access_token: str) -> dict:
     data = res.json().get("response", {})
     return {
         "id": data["id"],
-        "nickname": data.get("nickname", "사용자"),
-        "profile_image_url": data.get("profile_image", "")
+        "nickname": data.get("nickname") or None,
+        "profile_image_url": data.get("profile_image") or None
     }
 
 
@@ -53,21 +55,20 @@ async def social_login(provider: str, access_token: str) -> dict:
     else:
         raise HTTPException(status_code=400, detail="지원하지 않는 provider")
 
-    # 2. 개인정보 암호화 + provider_id 가명처리 후 DB upsert
-    encrypted = encrypt_user({
-        "provider_id": user_info["id"],
-        "nickname": user_info["nickname"],
-        "profile_image_url": user_info["profile_image_url"],
-    })
+    # 2. DB upsert — provider_id 가명처리는 항상, 닉네임/프로필은 실제로 받아왔을 때만 갱신한다.
+    #    (미동의 폴백으로 기존 실명을 덮어쓰지 않도록 — 한 번 받은 실명은 보존)
+    upsert_data = {
+        "provider": provider,
+        "provider_id": pseudonymize(user_info["id"]),
+        "last_login_at": datetime.utcnow().isoformat(),
+    }
+    if user_info.get("nickname"):
+        upsert_data["nickname"] = encrypt(user_info["nickname"])          # AES-256 암호화
+    if user_info.get("profile_image_url"):
+        upsert_data["profile_image_url"] = encrypt(user_info["profile_image_url"])
 
     result = supabase_admin.table("users").upsert(
-        {
-            "provider": provider,
-            "provider_id": encrypted["provider_id"],       # 가명처리된 값
-            "nickname": encrypted["nickname"],             # AES-256 암호화
-            "profile_image_url": encrypted["profile_image_url"],  # AES-256 암호화
-            "last_login_at": datetime.utcnow().isoformat(),
-        },
+        upsert_data,
         on_conflict="provider,provider_id"
     ).execute()
 

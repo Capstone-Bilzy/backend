@@ -11,8 +11,13 @@ ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
-async def save_receipt(file: UploadFile, user_id: str) -> dict:
-    """영수증 임시 저장 (정산 연결 전)"""
+async def save_receipt(
+    file: UploadFile,
+    user_id: str,
+    store_name: str | None = None,
+    total_amount: int | None = None,
+) -> dict:
+    """영수증 보관함 저장. 가게명·총액은 OCR 후 사용자 수동확인 값(선택)."""
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
 
@@ -27,10 +32,18 @@ async def save_receipt(file: UploadFile, user_id: str) -> dict:
         file_path, contents, {"content-type": file.content_type}
     )
 
+    # 사용자 입력 값 정제 — 가게명 100자 컷, 총액 0~1억 클램프(음수/과대 방어).
+    clean_name = (store_name or "").strip()[:100] or None
+    clean_total = None
+    if total_amount is not None:
+        clean_total = max(0, min(int(total_amount), 100_000_000))
+
     result = supabase_admin.table("saved_receipts").insert({
         "user_id": user_id,
         "image_url": file_path,   # 레거시 컬럼 — 경로 보관(공개 URL 아님)
         "file_path": file_path,
+        "store_name": clean_name,
+        "total_amount": clean_total,
     }).execute()
 
     logger.info(f"RECEIPT_SAVED user={user_id[:8]}***")

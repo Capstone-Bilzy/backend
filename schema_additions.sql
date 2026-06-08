@@ -15,6 +15,11 @@ create table if not exists saved_receipts (
 
 create index if not exists on saved_receipts(user_id);
 
+-- ②-1 저장 영수증에 OCR/수동확인 메타데이터 컬럼 추가 (가게명·총액). nullable — 기존 행 호환.
+alter table saved_receipts
+  add column if not exists store_name text,
+  add column if not exists total_amount integer;
+
 -- ③ consent_logs - 약관 항목 세분화
 -- (기존 테이블 그대로 사용, consent_type 값만 추가)
 -- privacy_policy   : 개인정보처리방침 (필수)
