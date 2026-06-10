@@ -1,3 +1,5 @@
+import asyncio
+import time
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
@@ -8,6 +10,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 bearer = HTTPBearer()
+
+# 인증 유저 레코드 단기 캐시(user_id -> (record, expires_at)).
+# 모든 인증 요청이 users 테이블을 왕복하던 비용을 제거한다.
+# 표시용 프로필은 /users/me가 별도 조회하므로 이 캐시의 영향을 받지 않는다.
+_user_cache: dict = {}
+_USER_CACHE_TTL = 30  # 초
+
+
+def invalidate_user_cache(user_id: str = None):
+    """유저 캐시 무효화. user_id 미지정 시 전체 비움."""
+    if user_id is None:
+        _user_cache.clear()
+    else:
+        _user_cache.pop(user_id, None)
 
 
 def create_access_token(user_id: str) -> str:
@@ -52,8 +68,18 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
     # 보안 로그: 요청 기록
     logger.info(f"AUTH user={user_id[:8]}***")
 
-    result = supabase_admin.table("users").select("*").eq("id", user_id).single().execute()
+    # 단기 캐시 히트면 users 테이블 왕복을 건너뛴다.
+    now = time.monotonic()
+    cached = _user_cache.get(user_id)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    # 동기 supabase 클라이언트가 이벤트 루프를 막지 않도록 스레드에서 실행.
+    result = await asyncio.to_thread(
+        lambda: supabase_admin.table("users").select("*").eq("id", user_id).single().execute()
+    )
     if not result.data:
         raise HTTPException(status_code=401, detail="유저를 찾을 수 없습니다")
 
+    _user_cache[user_id] = (result.data, now + _USER_CACHE_TTL)
     return result.data
