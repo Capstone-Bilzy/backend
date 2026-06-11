@@ -94,6 +94,29 @@ async def delete_settlement(settlement_id: str, user_id: str):
     logger.info(f"SETTLEMENT_DELETED id={settlement_id} user={user_id[:8]}***")
 
 
+async def delete_receipt_image(settlement_id: str, user_id: str):
+    """정산건에 붙은 영수증 이미지 삭제 (앱에서 '저장 안 함'/'다시 찍기' 선택 시).
+
+    Storage 객체를 제거하고 settlements.receipt_image_url을 null로 비운다. 소유자만 가능.
+    이미지가 없으면 멱등하게 통과한다.
+    """
+    settlement = _check_owner(settlement_id, user_id)
+
+    path = settlement.get("receipt_image_url")
+    if path:
+        try:
+            # receipt_image_url은 버킷 내 경로(receipts/{id}/{uuid}.jpg). split은 풀 URL 형태도 방어.
+            key = path.split("/receipts/")[-1]
+            supabase_admin.storage.from_("receipts").remove([f"receipts/{key}"])
+        except Exception as e:
+            logger.error(f"Receipt image remove failed for {settlement_id}: {e}")
+
+        supabase_admin.table("settlements") \
+            .update({"receipt_image_url": None}).eq("id", settlement_id).execute()
+
+    logger.info(f"RECEIPT_IMAGE_DELETED settlement={settlement_id} user={user_id[:8]}***")
+
+
 async def add_member(settlement_id: str, user_id: str, nickname: str, requester_id: str) -> dict:
     """방장이 참여자 추가하거나, 본인이 QR로 입장"""
     settlement = supabase_admin.table("settlements") \

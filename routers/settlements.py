@@ -33,6 +33,13 @@ async def delete(settlement_id: str, current_user=Depends(get_current_user)):
     return {"message": "삭제 완료"}
 
 
+@router.delete("/{settlement_id}/receipt")
+async def delete_receipt(settlement_id: str, current_user=Depends(get_current_user)):
+    """정산건의 영수증 이미지 삭제 — 앱에서 '저장 안 함'/'다시 찍기' 선택 시."""
+    await settlement_service.delete_receipt_image(settlement_id, current_user["id"])
+    return {"message": "영수증 이미지 삭제 완료"}
+
+
 # 참여자
 @router.post("/{settlement_id}/members")
 async def add_member(settlement_id: str, body: AddMemberRequest, current_user=Depends(get_current_user)):
