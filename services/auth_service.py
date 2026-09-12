@@ -57,13 +57,25 @@ async def social_login(provider: str, access_token: str) -> dict:
 
     # 2. DB upsert — provider_id 가명처리는 항상, 닉네임/프로필은 실제로 받아왔을 때만 갱신한다.
     #    (미동의 폴백으로 기존 실명을 덮어쓰지 않도록 — 한 번 받은 실명은 보존)
+    provider_id_hash = pseudonymize(user_info["id"])
+
+    # users.nickname은 not null 컬럼이라, 처음 로그인하는 유저가 닉네임 동의를 안 했으면
+    # nickname 키가 아예 빠진 채 INSERT가 되어 not-null 제약 위반(500)이 난다.
+    # → 신규 유저인지 먼저 확인해서, 신규인데 닉네임이 없으면 폴백 값을 채운다.
+    existing = supabase_admin.table("users") \
+        .select("id").eq("provider", provider).eq("provider_id", provider_id_hash) \
+        .execute()
+    is_new_user = not existing.data
+
     upsert_data = {
         "provider": provider,
-        "provider_id": pseudonymize(user_info["id"]),
+        "provider_id": provider_id_hash,
         "last_login_at": datetime.utcnow().isoformat(),
     }
     if user_info.get("nickname"):
         upsert_data["nickname"] = encrypt(user_info["nickname"])          # AES-256 암호화
+    elif is_new_user:
+        upsert_data["nickname"] = encrypt("사용자")                        # 신규 유저 폴백 (not null 제약)
     if user_info.get("profile_image_url"):
         upsert_data["profile_image_url"] = encrypt(user_info["profile_image_url"])
 

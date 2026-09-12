@@ -87,7 +87,37 @@ async def scan_only(file: UploadFile) -> dict:
     return {"items": ocr_result.get("items", []), "total": total}
 
 
-async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) -> dict:
+def _check_settlement_owner(settlement_id: str, user_id: str) -> dict:
+    settlement = supabase_admin.table("settlements") \
+        .select("id").eq("id", settlement_id).eq("created_by", user_id).execute()
+    if not settlement.data:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    return settlement.data[0]
+
+
+def _get_or_create_receipt(settlement_id: str, round: int) -> dict:
+    """정산방의 특정 라운드 receipts row를 찾거나 없으면 만든다."""
+    existing = supabase_admin.table("receipts") \
+        .select("*").eq("settlement_id", settlement_id).eq("round", round).execute()
+    if existing.data:
+        return existing.data[0]
+    created = supabase_admin.table("receipts").insert({
+        "settlement_id": settlement_id,
+        "round": round,
+    }).execute()
+    return created.data[0]
+
+
+def _recompute_settlement_total(settlement_id: str):
+    """모든 라운드(receipts) 합계를 settlements.total_amount에 반영한다."""
+    receipts = supabase_admin.table("receipts") \
+        .select("total_amount").eq("settlement_id", settlement_id).execute()
+    total = sum(r["total_amount"] or 0 for r in receipts.data)
+    supabase_admin.table("settlements").update({"total_amount": total}).eq("id", settlement_id).execute()
+    return total
+
+
+async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user_id: str) -> dict:
     # 1. 입력 검증
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
@@ -98,38 +128,40 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
     verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
 
     # 2. 정산방 소유자 확인 (IDOR 방어)
-    settlement = supabase_admin.table("settlements") \
-        .select("id").eq("id", settlement_id).eq("created_by", user_id).execute()
-    if not settlement.data:
-        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    _check_settlement_owner(settlement_id, user_id)
 
     # 3. Gemini Vision으로 OCR
     ocr_result = await scan_with_gemini(contents, file.content_type)
 
+    # 항목을 하나도 못 읽었으면 "인식 성공(빈 결과)"이 아니라 실패로 취급한다 —
+    # 그래야 앱이 RecognizingFragment의 재촬영/직접입력 폴백을 보여준다.
+    if not ocr_result.get("items"):
+        logger.warning(f"OCR_EMPTY settlement={settlement_id} round={round} user={user_id[:8]}***")
+        raise HTTPException(status_code=422, detail="영수증에서 항목을 인식하지 못했어요. 다시 촬영해주세요")
+
     # 4. Supabase Storage(private 버킷)에 저장 — 공개 URL이 아닌 in-bucket 경로만 DB에 보관.
     #    조회 시 settlement_service가 멤버에게만 단기 signed URL을 발급한다.
-    file_path = f"receipts/{settlement_id}/{uuid.uuid4()}.jpg"
+    file_path = f"receipts/{settlement_id}/{round}/{uuid.uuid4()}.jpg"
     supabase_admin.storage.from_("receipts").upload(
         file_path, contents, {"content-type": file.content_type}
     )
 
-    # 5. OCR 결과 DB 저장
+    # 5. 이 라운드의 receipts row에 OCR 결과 반영
     total = ocr_result.get("total", sum(
         i["price"] * i["quantity"] for i in ocr_result.get("items", [])
     ))
-
-    supabase_admin.table("settlements").update({
+    receipt = _get_or_create_receipt(settlement_id, round)
+    supabase_admin.table("receipts").update({
         "receipt_image_url": file_path,
         "total_amount": total,
-        "status": "scanning"
-    }).eq("id", settlement_id).execute()
+    }).eq("id", receipt["id"]).execute()
 
-    # 6. 영수증 항목 저장
+    # 6. 이 라운드의 항목만 교체 (다른 라운드는 건드리지 않음)
+    supabase_admin.table("receipt_items").delete().eq("receipt_id", receipt["id"]).execute()
     if ocr_result.get("items"):
-        supabase_admin.table("receipt_items").delete().eq("settlement_id", settlement_id).execute()
         supabase_admin.table("receipt_items").insert([
             {
-                "settlement_id": settlement_id,
+                "receipt_id": receipt["id"],
                 "name": item["name"][:50],
                 "price": max(0, min(item["price"], 10_000_000)),
                 "quantity": max(1, min(item["quantity"], 100)),
@@ -137,10 +169,13 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
             for item in ocr_result["items"]
         ]).execute()
 
-    logger.info(f"OCR_SCAN settlement={settlement_id} items={len(ocr_result.get('items',[]))} user={user_id[:8]}***")
+    _recompute_settlement_total(settlement_id)
+
+    logger.info(f"OCR_SCAN settlement={settlement_id} round={round} items={len(ocr_result.get('items',[]))} user={user_id[:8]}***")
 
     return {
         "settlement_id": settlement_id,
+        "round": round,
         "image_url": signed_receipt_url(file_path),
         "items": ocr_result.get("items", []),
         "total": total,
@@ -148,17 +183,17 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, user_id: str) ->
     }
 
 
-async def confirm_ocr(settlement_id: str, items: list, user_id: str) -> dict:
-    """앱에서 ML Kit OCR 결과 + 수동 수정 후 확정"""
+async def confirm_ocr(settlement_id: str, round: int, store_name: str, items: list, user_id: str) -> dict:
+    """앱에서 ML Kit OCR 결과 + 수동 수정 후 확정. 이 라운드(receipt)의 항목만 교체한다 —
+    다른 라운드의 데이터는 그대로 유지되어 다차 정산이 가능하다."""
 
     # 정산방 소유자 확인
-    settlement = supabase_admin.table("settlements") \
-        .select("id").eq("id", settlement_id).eq("created_by", user_id).execute()
-    if not settlement.data:
-        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    _check_settlement_owner(settlement_id, user_id)
 
-    # 기존 항목 삭제 후 재삽입
-    supabase_admin.table("receipt_items").delete().eq("settlement_id", settlement_id).execute()
+    receipt = _get_or_create_receipt(settlement_id, round)
+
+    # 이 라운드 항목만 삭제 후 재삽입
+    supabase_admin.table("receipt_items").delete().eq("receipt_id", receipt["id"]).execute()
 
     # 입력값 검증 후 삽입
     validated_items = []
@@ -168,43 +203,43 @@ async def confirm_ocr(settlement_id: str, items: list, user_id: str) -> dict:
         price = max(0, min(int(item.get("price", 0)), 10_000_000))
         quantity = max(1, min(int(item.get("quantity", 1)), 100))
         validated_items.append({
-            "settlement_id": settlement_id,
+            "receipt_id": receipt["id"],
             "name": name,
             "price": price,
             "quantity": quantity
         })
         total += price * quantity
 
-    supabase_admin.table("receipt_items").insert(validated_items).execute()
+    if validated_items:
+        supabase_admin.table("receipt_items").insert(validated_items).execute()
 
-    # 총액 업데이트
-    supabase_admin.table("settlements").update({
+    # 이 라운드의 가게명/총액 갱신, 정산방 전체 총액 재계산
+    supabase_admin.table("receipts").update({
+        "store_name": store_name[:50] if store_name else None,
         "total_amount": total,
-        "status": "waiting"
-    }).eq("id", settlement_id).execute()
+    }).eq("id", receipt["id"]).execute()
+    settlement_total = _recompute_settlement_total(settlement_id)
 
-    return {"total_amount": total, "items": validated_items}
+    return {"round": round, "total_amount": total, "settlement_total_amount": settlement_total, "items": validated_items}
 
 
-async def add_item(settlement_id: str, name: str, price: int, quantity: int, user_id: str) -> dict:
+async def add_item(settlement_id: str, round: int, name: str, price: int, quantity: int, user_id: str) -> dict:
     # 정산방 소유자 확인
-    settlement = supabase_admin.table("settlements") \
-        .select("id, total_amount").eq("id", settlement_id).eq("created_by", user_id).execute()
-    if not settlement.data:
-        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    _check_settlement_owner(settlement_id, user_id)
+    receipt = _get_or_create_receipt(settlement_id, round)
 
     result = supabase_admin.table("receipt_items").insert({
-        "settlement_id": settlement_id,
+        "receipt_id": receipt["id"],
         "name": name,
         "price": price,
         "quantity": quantity
     }).execute()
 
-    # 총액 재계산
+    # 이 라운드 총액 재계산 후 정산방 합계 갱신
     items = supabase_admin.table("receipt_items") \
-        .select("price, quantity").eq("settlement_id", settlement_id).execute()
-    total = sum(i["price"] * i["quantity"] for i in items.data)
-
-    supabase_admin.table("settlements").update({"total_amount": total}).eq("id", settlement_id).execute()
+        .select("price, quantity").eq("receipt_id", receipt["id"]).execute()
+    round_total = sum(i["price"] * i["quantity"] for i in items.data)
+    supabase_admin.table("receipts").update({"total_amount": round_total}).eq("id", receipt["id"]).execute()
+    _recompute_settlement_total(settlement_id)
 
     return result.data[0]

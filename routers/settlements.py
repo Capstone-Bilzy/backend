@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Depends, Response, Request
-from models.schemas import CreateSettlementRequest, UpdateSettlementRequest, UpdateStatusRequest, AddMemberRequest, CalculateRequest
+from fastapi import APIRouter, Depends, Response, Request, Query, Path
+from models.schemas import (
+    CreateSettlementRequest, UpdateSettlementRequest, UpdateStatusRequest, AddMemberRequest,
+    CalculateRequest, SetMemberRoundsRequest, SetRoundAdjustmentRequest
+)
 from services import settlement_service, ai_service, qr_service
 from core.security import get_current_user
 from core.limiter import limiter
@@ -34,9 +37,11 @@ async def delete(settlement_id: str, current_user=Depends(get_current_user)):
 
 
 @router.delete("/{settlement_id}/receipt")
-async def delete_receipt(settlement_id: str, current_user=Depends(get_current_user)):
-    """정산건의 영수증 이미지 삭제 — 앱에서 '저장 안 함'/'다시 찍기' 선택 시."""
-    await settlement_service.delete_receipt_image(settlement_id, current_user["id"])
+async def delete_receipt(
+    settlement_id: str, round: int = Query(default=1, gt=0, le=100), current_user=Depends(get_current_user)
+):
+    """정산건의 특정 라운드 영수증 이미지 삭제 — 앱에서 '저장 안 함'/'다시 찍기' 선택 시."""
+    await settlement_service.delete_receipt_image(settlement_id, round, current_user["id"])
     return {"message": "영수증 이미지 삭제 완료"}
 
 
@@ -52,6 +57,37 @@ async def add_member(settlement_id: str, body: AddMemberRequest, current_user=De
 async def remove_member(settlement_id: str, member_user_id: str, current_user=Depends(get_current_user)):
     await settlement_service.remove_member(settlement_id, member_user_id, current_user["id"])
     return {"message": "제거 완료"}
+
+
+# 참여자 본인의 라운드 참여/조정 (RoundPick, AmountAdjust 화면)
+@router.patch("/{settlement_id}/members/me/rounds")
+@limiter.limit("30/minute")
+async def set_my_rounds(
+    request: Request, settlement_id: str, body: SetMemberRoundsRequest, current_user=Depends(get_current_user)
+):
+    return await settlement_service.set_member_rounds(settlement_id, current_user["id"], body.rounds)
+
+
+@router.patch("/{settlement_id}/members/me/rounds/{round}")
+@limiter.limit("30/minute")
+async def set_my_round_adjustment(
+    request: Request,
+    settlement_id: str,
+    round: int = Path(gt=0, le=100),
+    body: SetRoundAdjustmentRequest = ...,
+    current_user=Depends(get_current_user),
+):
+    return await settlement_service.set_member_round_adjustment(
+        settlement_id, current_user["id"], round, body.excluded_item_names
+    )
+
+
+@router.patch("/{settlement_id}/members/me/ready")
+@limiter.limit("30/minute")
+async def set_my_ready(request: Request, settlement_id: str, current_user=Depends(get_current_user)):
+    """AmountAdjust 화면에서 "정산 시작하기"를 누르면 호출 — 다른 멤버들이 CalculatingFragment에서
+    이 사람의 준비 완료 여부를 실시간으로 볼 수 있게 한다."""
+    return await settlement_service.set_member_ready(settlement_id, current_user["id"])
 
 
 # AI 정산

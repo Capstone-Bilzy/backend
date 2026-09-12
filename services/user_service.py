@@ -77,7 +77,7 @@ async def get_history(user_id: str, request=None) -> list:
     result = supabase_admin.table("history") \
         .select("*, settlements(id, title, total_amount, status, created_at, settlement_members(count))") \
         .eq("user_id", user_id) \
-        .order("created_at", desc=True) \
+        .order("created_at", desc=True, foreign_table="settlements") \
         .execute()
 
     # settlement_members(count) → member_count 평탄화
