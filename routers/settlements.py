@@ -47,9 +47,10 @@ async def delete_receipt(
 
 # 참여자
 @router.post("/{settlement_id}/members")
-async def add_member(settlement_id: str, body: AddMemberRequest, current_user=Depends(get_current_user)):
+@limiter.limit("20/minute")
+async def add_member(request: Request, settlement_id: str, body: AddMemberRequest, current_user=Depends(get_current_user)):
     return await settlement_service.add_member(
-        settlement_id, current_user["id"], body.nickname, current_user["id"]
+        settlement_id, current_user["id"], body.nickname, current_user["id"], body.invite_token
     )
 
 
@@ -115,8 +116,21 @@ async def get_qr(settlement_id: str, current_user=Depends(get_current_user)):
 
 
 @router.post("/{settlement_id}/join")
-async def join(settlement_id: str, body: AddMemberRequest, current_user=Depends(get_current_user)):
-    return await qr_service.join_by_qr(settlement_id, body.nickname, current_user["id"])
+@limiter.limit("20/minute")
+async def join(request: Request, settlement_id: str, body: AddMemberRequest, current_user=Depends(get_current_user)):
+    return await qr_service.join_by_qr(settlement_id, body.nickname, current_user["id"], body.invite_token)
+
+
+@router.post("/{settlement_id}/invite-token")
+@limiter.limit("30/minute")
+async def issue_invite_token(
+    request: Request, settlement_id: str, regenerate: bool = False, current_user=Depends(get_current_user)
+):
+    """서명+24시간 만료 초대 토큰 발급 (방장만 가능).
+
+    regenerate=True면 invite_epoch를 올려 기존에 뿌려진 토큰을 전부 무효화한 뒤 새로 발급한다.
+    """
+    return await qr_service.create_invite_token(settlement_id, current_user["id"], regenerate)
 
 
 from pydantic import BaseModel, Field

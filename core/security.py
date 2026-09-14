@@ -1,7 +1,7 @@
 import asyncio
 import time
 from datetime import datetime, timedelta
-from jose import JWTError, jwt
+from jose import ExpiredSignatureError, JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from core.config import settings
@@ -42,6 +42,42 @@ def create_refresh_token(user_id: str) -> str:
         settings.JWT_SECRET,
         algorithm=settings.JWT_ALGORITHM
     )
+
+
+def create_invite_token(settlement_id: str, ttl_hours: int = 24, epoch: int = 1) -> tuple[str, datetime]:
+    expire = datetime.utcnow() + timedelta(hours=ttl_hours)
+    token = jwt.encode(
+        {"sid": settlement_id, "type": "invite", "epoch": epoch, "exp": expire},
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM
+    )
+    return token, expire
+
+
+def decode_invite_token(token: str) -> dict:
+    # 초대 토큰 검증 실패는 로그인 인증 문제가 아니라 비즈니스 검증 실패라서 403을 쓴다.
+    # 401로 내려가면 Android OkHttp Authenticator가 모든 401에 반응해 불필요한
+    # refresh 재시도/로그아웃을 유발한다(진짜 인증 실패인 get_current_user의 401과는 구분).
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "INVITE_TOKEN_EXPIRED", "message": "초대 링크가 만료됐어요"}
+        )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "INVITE_TOKEN_INVALID", "message": "유효하지 않은 초대 링크예요"}
+        )
+
+    if payload.get("type") != "invite":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error_code": "INVITE_TOKEN_INVALID", "message": "유효하지 않은 초대 링크예요"}
+        )
+
+    return payload
 
 
 def decode_token(token: str) -> dict:

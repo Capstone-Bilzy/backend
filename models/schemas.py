@@ -58,6 +58,7 @@ class UpdateStatusRequest(BaseModel):
 
 class AddMemberRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=20)
+    invite_token: Optional[str] = Field(default=None, max_length=1000)
 
 class CalculateRequest(BaseModel):
     ai_note: str = Field(max_length=500, default="")  # "철수 삼겹살 안먹음, 영희 30분 늦게 옴"

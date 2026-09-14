@@ -279,16 +279,49 @@ def _dedupe_nickname(settlement_id: str, nickname: str) -> str:
     return f"{base}({n})"
 
 
-async def add_member(settlement_id: str, user_id: str, nickname: str, requester_id: str) -> dict:
+async def add_member(
+    settlement_id: str, user_id: str, nickname: str, requester_id: str, invite_token: str | None = None
+) -> dict:
     """방장이 참여자 추가하거나, 본인이 QR로 입장"""
     settlement = supabase_admin.table("settlements") \
         .select("*").eq("id", settlement_id).execute()
     if not settlement.data:
         raise HTTPException(status_code=404, detail="정산방을 찾을 수 없습니다")
+    settlement_row = settlement.data[0]
 
     # 중복 참여 방지
     existing = supabase_admin.table("settlement_members") \
         .select("id").eq("settlement_id", settlement_id).eq("user_id", user_id).execute()
+
+    # 방장 본인 입장(RoomViewModel.ensureMyMembershipAndAwait)이나 기존 멤버 재입장은
+    # 초대 링크 검증 없이 통과시킨다 — 새로 들어오는 비회원만 토큰을 요구.
+    is_owner = settlement_row["created_by"] == user_id
+    if not is_owner and not existing.data:
+        if settlement_row.get("status") == "done":
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": "SETTLEMENT_DONE", "message": "이미 완료된 정산방이에요"}
+            )
+        if not invite_token:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "INVITE_TOKEN_MISSING", "message": "초대 링크가 필요해요"}
+            )
+        from core.security import decode_invite_token
+        payload = decode_invite_token(invite_token)
+        if payload.get("sid") != settlement_id:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "INVITE_TOKEN_INVALID", "message": "유효하지 않은 초대 링크예요"}
+            )
+        # 방장이 QR을 재발급(regenerate)하면 invite_epoch가 올라간다 — 옛 epoch로 서명된
+        # 토큰(이미 공유돼 회수 불가능한 QR/링크)은 여기서 무효화된다.
+        if payload.get("epoch", 1) != settlement_row.get("invite_epoch", 1):
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "INVITE_TOKEN_INVALID", "message": "유효하지 않은 초대 링크예요"}
+            )
+
     if existing.data:
         raise HTTPException(status_code=409, detail="이미 참여 중입니다")
 
