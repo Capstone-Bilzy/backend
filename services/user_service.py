@@ -37,23 +37,31 @@ async def update_profile(user_id: str, nickname: str, request: Request = None) -
 async def delete_account(user_id: str):
     """회원탈퇴 - 개인정보보호법 제21조: 즉시 파기"""
 
-    # 1. 영수증 이미지 삭제
     settlements = supabase_admin.table("settlements") \
-        .select("id, receipt_image_url").eq("created_by", user_id).execute()
+        .select("id").eq("created_by", user_id).execute()
+    settlement_ids = [s["id"] for s in settlements.data or []]
 
-    for s in settlements.data or []:
-        if s.get("receipt_image_url"):
-            try:
-                path = s["receipt_image_url"].split("/receipts/")[-1]
-                supabase_admin.storage.from_("receipts").remove([f"receipts/{path}"])
-            except Exception:
-                pass
+    # 1. 영수증 이미지 삭제
+    # receipt_image_url은 settlements가 아니라 다차 정산 재설계 이후 라운드별 receipts 테이블에 있음
+    receipt_ids = []
+    if settlement_ids:
+        receipts = supabase_admin.table("receipts") \
+            .select("id, receipt_image_url").in_("settlement_id", settlement_ids).execute()
+        for r in receipts.data or []:
+            receipt_ids.append(r["id"])
+            if r.get("receipt_image_url"):
+                try:
+                    path = r["receipt_image_url"].split("/receipts/")[-1]
+                    supabase_admin.storage.from_("receipts").remove([f"receipts/{path}"])
+                except Exception:
+                    pass
 
     # 2. 연관 데이터 삭제
-    settlement_ids = [s["id"] for s in settlements.data or []]
-    if settlement_ids:
+    if receipt_ids:
+        # receipt_items는 settlement_id가 아니라 receipt_id로 receipts를 참조함
         supabase_admin.table("receipt_items") \
-            .delete().in_("settlement_id", settlement_ids).execute()
+            .delete().in_("receipt_id", receipt_ids).execute()
+    if settlement_ids:
         supabase_admin.table("settlement_members") \
             .delete().in_("settlement_id", settlement_ids).execute()
         supabase_admin.table("settlements") \
@@ -110,11 +118,14 @@ async def get_history_detail(settlement_id: str, user_id: str, request=None) -> 
     members = supabase_admin.table("settlement_members") \
         .select("*").eq("settlement_id", settlement_id).execute()
 
+    # receipt_items는 settlement_id가 아니라 receipt_id로 receipts를 참조함
+    receipt_ids = [r["id"] for r in supabase_admin.table("receipts")
+                   .select("id").eq("settlement_id", settlement_id).execute().data]
     items = supabase_admin.table("receipt_items") \
-        .select("*").eq("settlement_id", settlement_id).execute()
+        .select("*").in_("receipt_id", receipt_ids).execute() if receipt_ids else None
 
     return {
         **settlement.data,
         "members": members.data,
-        "items": items.data
+        "items": items.data if items else []
     }

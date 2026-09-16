@@ -40,24 +40,34 @@ async def purge_old_receipts():
     """정산 완료 후 90일 지난 영수증 이미지 파기"""
     cutoff = (datetime.utcnow() - timedelta(days=90)).isoformat()
 
-    old = supabase_admin.table("settlements") \
-        .select("id, receipt_image_url") \
+    # receipt_image_url은 settlements가 아니라 다차 정산 재설계 이후 라운드별 receipts 테이블에 있음
+    done_settlements = supabase_admin.table("settlements") \
+        .select("id") \
         .eq("status", "done") \
         .lt("created_at", cutoff) \
+        .execute()
+    settlement_ids = [s["id"] for s in done_settlements.data or []]
+    if not settlement_ids:
+        logger.info("RETENTION: 파기 대상 없음")
+        return 0
+
+    old = supabase_admin.table("receipts") \
+        .select("id, receipt_image_url") \
+        .in_("settlement_id", settlement_ids) \
         .not_.is_("receipt_image_url", "null") \
         .execute()
 
     count = 0
-    for s in old.data or []:
+    for r in old.data or []:
         try:
-            path = s["receipt_image_url"].split("/receipts/")[-1]
+            path = r["receipt_image_url"].split("/receipts/")[-1]
             supabase_admin.storage.from_("receipts").remove([f"receipts/{path}"])
-            supabase_admin.table("settlements").update(
+            supabase_admin.table("receipts").update(
                 {"receipt_image_url": None}
-            ).eq("id", s["id"]).execute()
+            ).eq("id", r["id"]).execute()
             count += 1
         except Exception as e:
-            logger.error(f"Receipt purge failed for {s['id']}: {e}")
+            logger.error(f"Receipt purge failed for {r['id']}: {e}")
 
     logger.info(f"RETENTION: 영수증 이미지 {count}건 파기 완료")
     return count
