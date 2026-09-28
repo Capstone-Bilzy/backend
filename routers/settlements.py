@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Response, Request, Query, Path
 from models.schemas import (
     CreateSettlementRequest, UpdateSettlementRequest, UpdateStatusRequest, AddMemberRequest,
-    CalculateRequest, SetMemberRoundsRequest, SetRoundAdjustmentRequest
+    CalculateRequest, SetMemberRoundsRequest, SetRoundAdjustmentRequest, SetMemberCapacityRequest
 )
 from services import settlement_service, ai_service, qr_service
 from core.security import get_current_user
@@ -28,6 +28,15 @@ async def update_status(settlement_id: str, body: UpdateStatusRequest, current_u
 @router.patch("/{settlement_id}")
 async def update(settlement_id: str, body: UpdateSettlementRequest, current_user=Depends(get_current_user)):
     return await settlement_service.update_settlement(settlement_id, body.title, current_user["id"])
+
+
+@router.patch("/{settlement_id}/capacity")
+@limiter.limit("30/minute")
+async def set_capacity(
+    request: Request, settlement_id: str, body: SetMemberCapacityRequest, current_user=Depends(get_current_user)
+):
+    """PeopleCount 화면에서 방장이 정한 정원 저장 — 이후 join이 이 값을 넘지 못하게 막는다."""
+    return await settlement_service.set_member_capacity(settlement_id, body.member_capacity, current_user["id"])
 
 
 @router.delete("/{settlement_id}")
@@ -108,9 +117,11 @@ async def done(settlement_id: str, current_user=Depends(get_current_user)):
     return await settlement_service.mark_done(settlement_id, current_user["id"])
 
 
-# QR
+# QR — 클라이언트는 QR을 로컬(ZXing)에서 직접 생성해 이 엔드포인트를 쓰지 않는다(죽은 엔드포인트).
+# 그래도 외부에서 호출 가능한 채로 남아있어 다른 인증된 엔드포인트와 동일하게 rate limit을 건다.
 @router.get("/{settlement_id}/qr")
-async def get_qr(settlement_id: str, current_user=Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def get_qr(request: Request, settlement_id: str, current_user=Depends(get_current_user)):
     png = await qr_service.generate_qr(settlement_id, current_user["id"])
     return Response(content=png, media_type="image/png")
 

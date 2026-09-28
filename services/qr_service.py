@@ -25,9 +25,15 @@ async def create_invite_token(settlement_id: str, user_id: str, regenerate: bool
 
     epoch = settlement_row.get("invite_epoch", 1)
     if regenerate:
-        epoch += 1
-        supabase_admin.table("settlements") \
-            .update({"invite_epoch": epoch}).eq("id", settlement_id).execute()
+        # read-then-write(+1)는 동시 regenerate 호출 시 증가분이 유실될 수 있어
+        # DB 함수(increment_invite_epoch, schema_invite_epoch_atomic.sql)로 원자적으로 처리.
+        rpc_result = supabase_admin.rpc(
+            "increment_invite_epoch",
+            {"p_settlement_id": settlement_id, "p_owner_id": user_id},
+        ).execute()
+        if not rpc_result.data:
+            raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+        epoch = rpc_result.data
 
     token, expires_at = _create_invite_jwt(settlement_id, epoch=epoch)
     return {

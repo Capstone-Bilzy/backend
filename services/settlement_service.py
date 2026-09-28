@@ -146,6 +146,15 @@ async def update_settlement(settlement_id: str, title: str, user_id: str) -> dic
     return result.data[0]
 
 
+async def set_member_capacity(settlement_id: str, member_capacity: int, user_id: str) -> dict:
+    """방장이 정원(총 인원)을 설정 — 이후 join이 이 값을 초과하지 못하게 막는다(add_member)."""
+    _check_owner(settlement_id, user_id)
+
+    result = supabase_admin.table("settlements") \
+        .update({"member_capacity": member_capacity}).eq("id", settlement_id).execute()
+    return result.data[0]
+
+
 async def delete_settlement(settlement_id: str, user_id: str):
     _check_owner(settlement_id, user_id)
 
@@ -321,6 +330,23 @@ async def add_member(
                 status_code=403,
                 detail={"error_code": "INVITE_TOKEN_INVALID", "message": "유효하지 않은 초대 링크예요"}
             )
+
+        capacity = settlement_row.get("member_capacity")
+        if capacity is not None:
+            current_members = supabase_admin.table("settlement_members") \
+                .select("user_id").eq("settlement_id", settlement_id).execute()
+            # 방장은 QR 화면에서 자기 이름을 확정하기 전까지 아직 멤버로 등록되지 않는다
+            # (참여자 입력 화면에서 이름 확정 후에야 join — 잘못된 OAuth 닉네임 폴백으로
+            # 멤버가 먼저 생기는 걸 막기 위한 의도적 순서, QrInviteFragment 참고).
+            # 그래서 정원을 게스트 기준으로만 세면 방장 몫이 없어 정원+1까지 들어올 수 있다 —
+            # 방장이 아직 안 들어왔으면 정원에서 방장 자리 1개를 미리 빼둔다.
+            owner_joined = any(m["user_id"] == settlement_row["created_by"] for m in current_members.data)
+            effective_capacity = capacity if owner_joined else capacity - 1
+            if len(current_members.data) >= effective_capacity:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error_code": "SETTLEMENT_FULL", "message": "정원이 다 찼어요"}
+                )
 
     if existing.data:
         raise HTTPException(status_code=409, detail="이미 참여 중입니다")

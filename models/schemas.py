@@ -56,6 +56,9 @@ class UpdateSettlementRequest(BaseModel):
 class UpdateStatusRequest(BaseModel):
     status: SettlementStatus
 
+class SetMemberCapacityRequest(BaseModel):
+    member_capacity: conint(gt=0, le=100)
+
 class AddMemberRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=20)
     invite_token: Optional[str] = Field(default=None, max_length=1000)

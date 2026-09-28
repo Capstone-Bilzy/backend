@@ -39,9 +39,11 @@ async def get_naver_user_info(access_token: str) -> dict:
         raise HTTPException(status_code=401, detail="네이버 토큰이 유효하지 않습니다")
 
     data = res.json().get("response", {})
+    # 네이버 "별명"(nickname)은 사용자가 따로 설정해야 하는 선택 프로필이라 비어있는 계정이 많다.
+    # 콘솔에서 "이름" 제공 동의도 받았다면 실명(name)으로 대체해 "사용자" 폴백을 줄인다.
     return {
         "id": data["id"],
-        "nickname": data.get("nickname") or None,
+        "nickname": data.get("nickname") or data.get("name") or None,
         "profile_image_url": data.get("profile_image") or None
     }
 

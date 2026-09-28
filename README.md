@@ -86,6 +86,7 @@ Swagger UI: http://localhost:8000/docs (DEBUG=true 일 때만)
 | PATCH | /settlements/{id}/members/me/rounds | 내가 참여할 라운드 선택 (RoundPick, 30/min) |
 | PATCH | /settlements/{id}/members/me/rounds/{round} | 라운드별 제외 항목 조정 (AmountAdjust, 30/min) |
 | PATCH | /settlements/{id}/members/me/ready | 정산 준비 완료 표시 (30/min) |
+| PATCH | /settlements/{id}/capacity | 정원(총 인원) 설정 (방장, PeopleCount, join 시 초과 차단, 30/min) |
 | PATCH | /settlements/{id}/members/{member_id}/amount | 참여자 금액 수동 조정 (방장) |
 | POST | /settlements/{id}/calculate | AI 정산 계산 (10/min) |
 | GET | /settlements/{id}/result | 정산 결과 조회 (멤버만) |
