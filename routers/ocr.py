@@ -33,3 +33,15 @@ async def add_item(request: Request, body: AddItemRequest, current_user=Depends(
     return await ocr_service.add_item(
         body.settlement_id, body.round, body.name, body.price, body.quantity, current_user["id"]
     )
+
+
+@router.post("/attach-photo")
+@limiter.limit("20/minute")
+async def attach_receipt_photo(
+    request: Request,
+    settlement_id: str,
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user)
+):
+    """완료된 정산방에도 쓸 수 있는 순수 기록용 첨부 — OCR·금액 계산 없이 사진만 저장."""
+    return await ocr_service.attach_receipt_photo(settlement_id, file, current_user["id"])

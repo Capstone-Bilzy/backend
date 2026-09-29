@@ -243,3 +243,39 @@ async def add_item(settlement_id: str, round: int, name: str, price: int, quanti
     _recompute_settlement_total(settlement_id)
 
     return result.data[0]
+
+
+async def attach_receipt_photo(settlement_id: str, file: UploadFile, user_id: str) -> dict:
+    """완료된 정산방에 영수증 사진만 추가로 첨부한다(OCR·금액 계산 없음, 순수 기록용).
+    새 라운드(receipts row)를 만들어 이미지만 붙이고 total_amount는 0으로 둬서
+    정산방 총액(_recompute_settlement_total)에 영향을 주지 않는다."""
+    if file.content_type not in ALLOWED_MIME:
+        raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
+
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
+    verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
+
+    _check_settlement_owner(settlement_id, user_id)
+
+    existing_rounds = supabase_admin.table("receipts") \
+        .select("round").eq("settlement_id", settlement_id).order("round", desc=True).limit(1).execute()
+    next_round = (existing_rounds.data[0]["round"] + 1) if existing_rounds.data else 1
+
+    file_path = f"receipts/{settlement_id}/{next_round}/{uuid.uuid4()}.jpg"
+    supabase_admin.storage.from_("receipts").upload(
+        file_path, contents, {"content-type": file.content_type}
+    )
+
+    receipt = _get_or_create_receipt(settlement_id, next_round)
+    supabase_admin.table("receipts").update({
+        "receipt_image_url": file_path,
+    }).eq("id", receipt["id"]).execute()
+
+    logger.info(f"RECEIPT_PHOTO_ATTACHED settlement={settlement_id} round={next_round} user={user_id[:8]}***")
+
+    return {
+        "round": next_round,
+        "image_url": signed_receipt_url(file_path),
+    }

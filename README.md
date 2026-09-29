@@ -75,6 +75,7 @@ Swagger UI: http://localhost:8000/docs (DEBUG=true 일 때만)
 | POST | /ocr/scan | 영수증 이미지 업로드·OCR (라운드별, 10/min) |
 | POST | /ocr/confirm | OCR 결과 확정 (해당 라운드만 갱신, 30/min) |
 | POST | /ocr/add-item | 항목 수동 추가 |
+| POST | /ocr/attach-photo | 완료된 정산방에도 사진만 순수 첨부(OCR·금액 계산 없음, 20/min) |
 | POST | /settlements | 정산방 생성 |
 | GET | /settlements/{id} | 정산방 조회 (멤버만) |
 | PATCH | /settlements/{id} | 제목 등 수정 (방장) |
