@@ -121,12 +121,22 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
     flat_items = [item for r in receipts for item in r["items"]]
     first_receipt_image = receipts[0]["receipt_image_url"] if receipts else None
 
+    # 순수 기록용 첨부 사진 — 라운드/정산 계산과 무관(attach-photo로 추가된 것)
+    extra_photos_result = supabase_admin.table("settlement_extra_photos") \
+        .select("image_url, created_at").eq("settlement_id", settlement_id) \
+        .order("created_at", desc=False).execute()
+    extra_photos = [
+        {"image_url": signed_receipt_url(p["image_url"]), "created_at": p["created_at"]}
+        for p in extra_photos_result.data
+    ]
+
     return {
         **settlement,
         "receipt_image_url": first_receipt_image,
         "members": members_with_image,
         "items": flat_items,
         "receipts": receipts,
+        "extra_photos": extra_photos,
     }
 
 

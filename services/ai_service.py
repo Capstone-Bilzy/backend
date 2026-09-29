@@ -142,7 +142,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
             continue
         if round_no not in round_total_by_round:
             continue  # 실제 존재하지 않는 라운드는 무시(주입 방어)
-        round_cap = max(round_total_by_round[round_no], 0) or 10_000_000
+        round_cap = max(round_total_by_round[round_no], 0)
         for r in round_entry.get("results", []):
             nick = r.get("nickname")
             member = member_by_nick.get(nick)

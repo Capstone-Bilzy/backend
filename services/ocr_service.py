@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_EXTRA_PHOTOS = 30  # 정산방당 순수 첨부 사진 개수 상한(스토리지 남용 방지)
 
 # Gemini 클라이언트
 _client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -246,9 +247,8 @@ async def add_item(settlement_id: str, round: int, name: str, price: int, quanti
 
 
 async def attach_receipt_photo(settlement_id: str, file: UploadFile, user_id: str) -> dict:
-    """완료된 정산방에 영수증 사진만 추가로 첨부한다(OCR·금액 계산 없음, 순수 기록용).
-    새 라운드(receipts row)를 만들어 이미지만 붙이고 total_amount는 0으로 둬서
-    정산방 총액(_recompute_settlement_total)에 영향을 주지 않는다."""
+    """정산방에 영수증 사진만 순수 기록용으로 첨부한다(OCR·금액 계산 없음).
+    receipts(라운드)와 무관한 별도 테이블에 저장 — 정산 계산·참여자 몫에 전혀 영향을 주지 않는다."""
     if file.content_type not in ALLOWED_MIME:
         raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
 
@@ -259,23 +259,24 @@ async def attach_receipt_photo(settlement_id: str, file: UploadFile, user_id: st
 
     _check_settlement_owner(settlement_id, user_id)
 
-    existing_rounds = supabase_admin.table("receipts") \
-        .select("round").eq("settlement_id", settlement_id).order("round", desc=True).limit(1).execute()
-    next_round = (existing_rounds.data[0]["round"] + 1) if existing_rounds.data else 1
+    existing_count = supabase_admin.table("settlement_extra_photos") \
+        .select("id", count="exact").eq("settlement_id", settlement_id).execute()
+    if (existing_count.count or 0) >= MAX_EXTRA_PHOTOS:
+        raise HTTPException(status_code=400, detail=f"영수증 사진은 최대 {MAX_EXTRA_PHOTOS}장까지 추가할 수 있습니다")
 
-    file_path = f"receipts/{settlement_id}/{next_round}/{uuid.uuid4()}.jpg"
+    file_path = f"receipts/{settlement_id}/extra/{uuid.uuid4()}.jpg"
     supabase_admin.storage.from_("receipts").upload(
         file_path, contents, {"content-type": file.content_type}
     )
 
-    receipt = _get_or_create_receipt(settlement_id, next_round)
-    supabase_admin.table("receipts").update({
-        "receipt_image_url": file_path,
-    }).eq("id", receipt["id"]).execute()
+    supabase_admin.table("settlement_extra_photos").insert({
+        "settlement_id": settlement_id,
+        "image_url": file_path,
+        "uploaded_by": user_id,
+    }).execute()
 
-    logger.info(f"RECEIPT_PHOTO_ATTACHED settlement={settlement_id} round={next_round} user={user_id[:8]}***")
+    logger.info(f"RECEIPT_PHOTO_ATTACHED settlement={settlement_id} user={user_id[:8]}***")
 
     return {
-        "round": next_round,
         "image_url": signed_receipt_url(file_path),
     }
