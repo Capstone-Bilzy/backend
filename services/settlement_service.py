@@ -212,6 +212,59 @@ async def delete_receipt_image(settlement_id: str, round: int, user_id: str):
     logger.info(f"RECEIPT_IMAGE_DELETED settlement={settlement_id} round={round} user={user_id[:8]}***")
 
 
+async def delete_round(settlement_id: str, round: int, user_id: str) -> dict:
+    """정산방의 특정 차수(라운드)를 통째로 삭제하고 뒤 차수 번호를 한 칸씩 당긴다(1·2·3차 중 2차 삭제 → 1·2차).
+
+    소유자만 가능. 계산이 시작된 뒤(calculating/calculated/done)에는 금액이 이미 확정돼 있어 거부한다.
+    영수증 항목(receipt_items)은 receipts FK cascade로 함께 지워지고, 참여자별 라운드 기록
+    (settlement_member_rounds)은 삭제된 차수는 지우고 뒤 차수는 번호를 당긴다.
+    Supabase 클라이언트로는 트랜잭션을 못 묶으므로, unique(settlement_id, round)/(member, round)에 걸리지 않게
+    낮은 번호부터 차례로 당긴다.
+    """
+    settlement = _check_owner(settlement_id, user_id)
+    if settlement.get("status") in ("calculating", "calculated", "done"):
+        raise HTTPException(status_code=400, detail="정산 계산이 시작된 뒤에는 영수증을 삭제할 수 없습니다")
+
+    receipts = supabase_admin.table("receipts") \
+        .select("id, round, receipt_image_url").eq("settlement_id", settlement_id).execute().data
+    target = next((r for r in receipts if r["round"] == round), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="해당 차수의 영수증이 없습니다")
+
+    path = target.get("receipt_image_url")
+    if path:
+        try:
+            key = path.split("/receipts/")[-1]
+            supabase_admin.storage.from_("receipts").remove([f"receipts/{key}"])
+        except Exception as e:
+            logger.error(f"Receipt image remove failed for {settlement_id} round={round}: {e}")
+
+    supabase_admin.table("receipt_items").delete().eq("receipt_id", target["id"]).execute()
+    supabase_admin.table("receipts").delete().eq("id", target["id"]).execute()
+
+    member_ids = [m["id"] for m in supabase_admin.table("settlement_members")
+                  .select("id").eq("settlement_id", settlement_id).execute().data]
+    if member_ids:
+        supabase_admin.table("settlement_member_rounds").delete() \
+            .in_("settlement_member_id", member_ids).eq("round", round).execute()
+
+    later_rounds = sorted(r["round"] for r in receipts if r["round"] > round)
+    for r in later_rounds:
+        supabase_admin.table("receipts").update({"round": r - 1}) \
+            .eq("settlement_id", settlement_id).eq("round", r).execute()
+        if member_ids:
+            supabase_admin.table("settlement_member_rounds").update({"round": r - 1}) \
+                .in_("settlement_member_id", member_ids).eq("round", r).execute()
+
+    remaining = supabase_admin.table("receipts") \
+        .select("total_amount").eq("settlement_id", settlement_id).execute().data
+    total = sum(r["total_amount"] or 0 for r in remaining)
+    supabase_admin.table("settlements").update({"total_amount": total}).eq("id", settlement_id).execute()
+
+    logger.info(f"ROUND_DELETED settlement={settlement_id} round={round} user={user_id[:8]}***")
+    return {"message": "영수증 삭제 완료", "total_amount": total, "round_count": len(remaining)}
+
+
 async def set_member_rounds(settlement_id: str, user_id: str, rounds: list) -> dict:
     """참여자 본인이 참여한 라운드 집합을 지정한다(RoundPick 화면). 없으면 insert, 빠지면 delete."""
     _check_member(settlement_id, user_id)

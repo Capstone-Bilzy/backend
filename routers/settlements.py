@@ -54,6 +54,15 @@ async def delete_receipt(
     return {"message": "영수증 이미지 삭제 완료"}
 
 
+@router.delete("/{settlement_id}/rounds/{round}")
+@limiter.limit("30/minute")
+async def delete_round(
+    request: Request, settlement_id: str, round: int = Path(gt=0, le=100), current_user=Depends(get_current_user)
+):
+    """정산방의 특정 차수(영수증+항목)를 삭제하고 뒤 차수 번호를 당긴다 — 방장 전용(영수증 목록 화면 ✕)."""
+    return await settlement_service.delete_round(settlement_id, round, current_user["id"])
+
+
 # 참여자
 @router.post("/{settlement_id}/members")
 @limiter.limit("20/minute")
