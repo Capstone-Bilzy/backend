@@ -1,5 +1,6 @@
 from google import genai
 from google.genai import types
+import asyncio
 import json
 from fastapi import HTTPException
 from core.config import settings
@@ -9,6 +10,65 @@ import logging
 logger = logging.getLogger(__name__)
 
 _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+
+
+def _is_quota_error(error: Exception) -> bool:
+    """Gemini 무료 등급 한도 초과(429 RESOURCE_EXHAUSTED) 또는 일시 과부하(503 UNAVAILABLE) 여부."""
+    text = str(error)
+    return "RESOURCE_EXHAUSTED" in text or "429" in text or "UNAVAILABLE" in text
+
+
+def calculate_without_ai(rounds_payload: list) -> dict:
+    """Gemini 없이 프롬프트와 같은 규칙으로 정산을 계산한다(예비 경로). AI 응답과 같은 구조를 돌려준다.
+
+    규칙(프롬프트와 동일):
+    1. 각 라운드는 그 라운드 참여자끼리만 나눈다(미참여 라운드는 0원).
+    2. 항목마다, 그 항목을 "안 먹었다"고 한 사람을 뺀 나머지 참여자가 균등하게 나눈다.
+       참여자 전원이 제외한 항목은 낼 사람이 없으므로 참여자 전원이 균등하게 나눈다.
+    3. 라운드별 금액 합은 그 라운드 항목 총액과 원 단위까지 정확히 일치시킨다
+       (나눠떨어지지 않는 1원 단위 나머지는 소수 부분이 큰 사람부터 1원씩 배정).
+    """
+    round_results = []
+    totals: dict = {}
+    breakdown: dict = {}
+    for r in rounds_payload:
+        participants = r.get("participants") or []
+        names = [p["nickname"] for p in participants]
+        if not names:
+            round_results.append({"round": r["round"], "results": []})
+            continue
+        excluded = {p["nickname"]: set(p.get("excluded_items") or []) for p in participants}
+        shares = {n: 0.0 for n in names}
+        round_total = 0
+        for item in r.get("items") or []:
+            line_total = int(item["price"]) * int(item["quantity"])
+            round_total += line_total
+            eaters = [n for n in names if item["name"] not in excluded[n]] or names
+            for n in eaters:
+                shares[n] += line_total / len(eaters)
+
+        amounts = {n: int(shares[n]) for n in names}
+        remainder = round_total - sum(amounts.values())
+        by_fraction = sorted(names, key=lambda n: (-(shares[n] - int(shares[n])), names.index(n)))
+        for n in by_fraction[:max(0, remainder)]:
+            amounts[n] += 1
+
+        results = []
+        for n in names:
+            skipped = [i["name"] for i in (r.get("items") or []) if i["name"] in excluded[n]]
+            reason = f"{', '.join(skipped)} 제외" if skipped else "1/N 정산"
+            results.append({"nickname": n, "amount": amounts[n], "reason": reason})
+            totals[n] = totals.get(n, 0) + amounts[n]
+            breakdown.setdefault(n, []).append(f"{r['round']}차 {amounts[n]:,}원")
+        round_results.append({"round": r["round"], "results": results})
+
+    return {
+        "rounds": round_results,
+        "results": [
+            {"nickname": n, "amount": totals[n], "reason": " · ".join(breakdown[n])} for n in totals
+        ],
+        "summary": "참여한 차수와 안 먹은 항목을 기준으로 계산했어요",
+    }
 
 
 async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dict:
@@ -57,10 +117,19 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
             "participants": participants,
         })
 
-    # 상태 업데이트
+    # 상태 업데이트 (AI 호출이 실패하면 아래에서 이전 상태로 되돌린다)
+    previous_status = s.get("status") or "waiting"
     supabase_admin.table("settlements") \
         .update({"status": "calculating", "ai_note": ai_note}) \
         .eq("id", settlement_id).execute()
+
+    def _restore_status():
+        """AI 호출 실패 시 정산방이 'calculating'에 영원히 남지 않게 이전 상태로 되돌린다."""
+        try:
+            supabase_admin.table("settlements") \
+                .update({"status": previous_status}).eq("id", settlement_id).execute()
+        except Exception as restore_error:
+            logger.error(f"Status restore failed for {settlement_id}: {restore_error}")
 
     # Gemini 프롬프트
     prompt = f"""
@@ -105,10 +174,13 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 }}
 """
 
+    used_fallback = False
     try:
-        response = _client.models.generate_content(
+        # 동기 SDK 호출을 스레드로 넘겨, 계산이 도는 동안에도 서버가 다른 요청(멤버들의 상태 조회 등)을 받게 한다.
+        response = await asyncio.to_thread(
+            _client.models.generate_content,
             model="gemini-2.5-flash",
-            contents=prompt
+            contents=prompt,
         )
         raw = response.text.strip()
 
@@ -119,11 +191,19 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
                 raw = raw[4:]
         result = json.loads(raw.strip())
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="AI 계산 결과 파싱 실패")
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
-        raise HTTPException(status_code=500, detail="AI 계산 중 오류가 발생했습니다")
+        # Gemini가 실패하면(한도 초과 429, 과부하 503, 응답 파싱 실패 등) 정산이 멈추지 않도록
+        # 같은 규칙을 서버에서 직접 계산하는 예비 경로로 넘어간다.
+        logger.error(f"Gemini error, falling back to rule-based split: {e}")
+        try:
+            result = calculate_without_ai(rounds_payload)
+            used_fallback = True
+        except Exception as fallback_error:
+            logger.error(f"Rule-based split failed for {settlement_id}: {fallback_error}")
+            _restore_status()
+            if _is_quota_error(e):
+                raise HTTPException(status_code=503, detail="AI 사용량 한도를 초과했어요. 잠시 후 다시 시도해주세요")
+            raise HTTPException(status_code=500, detail="AI 계산 중 오류가 발생했습니다")
 
     # 결과를 settlement_member_rounds/settlement_members에 저장 — AI/프롬프트 인젝션이 낳을 수 있는
     # 음수·과대 금액, 정체불명 닉네임, 미참여 라운드 배정을 막기 위해 서버에서 검증 후 저장한다.
@@ -179,10 +259,13 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
     supabase_admin.table("settlements") \
         .update({"status": "calculated"}).eq("id", settlement_id).execute()
 
-    logger.info(f"AI_CALCULATE settlement={settlement_id} user={user_id[:8]}***")
+    logger.info(
+        f"{'RULE_CALCULATE' if used_fallback else 'AI_CALCULATE'} settlement={settlement_id} user={user_id[:8]}***"
+    )
 
     return {
         **result,
+        "calculated_by": "rule" if used_fallback else "ai",
         "ai_disclaimer": "이 정산 결과는 AI가 계산한 것으로 참고용이며 오류가 있을 수 있습니다."
     }
 

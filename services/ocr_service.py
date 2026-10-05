@@ -1,3 +1,4 @@
+import asyncio
 from google import genai
 from google.genai import types
 from fastapi import HTTPException, UploadFile
@@ -39,12 +40,14 @@ OCR_PROMPT = """
 async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
     """Gemini Vision으로 영수증 OCR + 파싱 한 번에"""
     try:
-        response = _client.models.generate_content(
+        # 동기 SDK 호출을 스레드로 넘겨, OCR이 도는 동안에도 서버가 다른 요청을 받게 한다.
+        response = await asyncio.to_thread(
+            _client.models.generate_content,
             model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 OCR_PROMPT,
-            ]
+            ],
         )
         raw = response.text.strip()
 
@@ -68,6 +71,9 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
         raise HTTPException(status_code=500, detail="영수증 파싱 실패 - 이미지를 다시 촬영해주세요")
     except Exception as e:
         logger.error(f"Gemini OCR error: {e}")
+        text = str(e)
+        if "RESOURCE_EXHAUSTED" in text or "429" in text or "UNAVAILABLE" in text:
+            raise HTTPException(status_code=503, detail="AI 사용량 한도를 초과했어요. 잠시 후 다시 시도하거나 직접 입력해주세요")
         raise HTTPException(status_code=500, detail="OCR 처리 중 오류가 발생했습니다")
 
 
