@@ -17,6 +17,13 @@ async def social_login(body: SocialLoginRequest, request: Request):
     return result
 
 
+@router.post("/social/check")
+@limiter.limit("10/minute")
+async def social_check(body: SocialLoginRequest, request: Request):
+    """소셜 토큰의 주인이 이미 가입한 회원인지 여부만 반환(가입·로그인 처리 없음)."""
+    return await auth_service.is_registered(body.provider, body.access_token)
+
+
 @router.post("/refresh")
 @limiter.limit("20/minute")
 async def refresh(body: RefreshRequest, request: Request):

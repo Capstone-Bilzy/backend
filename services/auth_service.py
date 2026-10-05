@@ -25,8 +25,16 @@ async def get_kakao_user_info(access_token: str) -> dict:
     return {
         "id": str(data["id"]),
         "nickname": profile.get("nickname") or None,
-        "profile_image_url": profile.get("profile_image_url") or None
+        # 카카오는 http://k.kakaocdn.net/... 로 내려주는데 Android는 평문(http) 이미지를 막는다 → https로 저장
+        "profile_image_url": _to_https(profile.get("profile_image_url")) or None
     }
+
+
+def _to_https(url):
+    """http:// 로 시작하는 주소를 https:// 로 바꾼다(그 외·빈 값은 그대로)."""
+    if isinstance(url, str) and url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
 
 
 async def get_naver_user_info(access_token: str) -> dict:
@@ -46,6 +54,25 @@ async def get_naver_user_info(access_token: str) -> dict:
         "nickname": data.get("nickname") or data.get("name") or None,
         "profile_image_url": data.get("profile_image") or None
     }
+
+
+async def is_registered(provider: str, access_token: str) -> dict:
+    """소셜 토큰의 주인이 이미 가입한 회원인지 확인만 한다(계정을 만들거나 로그인시키지 않음).
+
+    앱 회원가입 흐름에서 OAuth 직후 호출해, 이미 가입한 사람이면 약관 동의 화면을 건너뛰고
+    바로 로그인시키는 데 쓴다. 유효한 소셜 토큰을 가진 본인만 자기 가입 여부를 알 수 있다.
+    """
+    if provider == "kakao":
+        user_info = await get_kakao_user_info(access_token)
+    elif provider == "naver":
+        user_info = await get_naver_user_info(access_token)
+    else:
+        raise HTTPException(status_code=400, detail="지원하지 않는 provider")
+
+    existing = supabase_admin.table("users") \
+        .select("id").eq("provider", provider).eq("provider_id", pseudonymize(user_info["id"])) \
+        .execute()
+    return {"registered": bool(existing.data)}
 
 
 async def social_login(provider: str, access_token: str) -> dict:
