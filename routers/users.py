@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, Request
 from models.schemas import UpdateProfileRequest
 from services import user_service
 from core.security import get_current_user
+from core.ids import require_uuid_path_params
 
-router = APIRouter(prefix="/users", tags=["유저"])
+router = APIRouter(prefix="/users", tags=["유저"], dependencies=[Depends(require_uuid_path_params)])
 
 
 @router.get("/me")

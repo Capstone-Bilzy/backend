@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
 from typing import Optional
 from core.security import get_current_user
+from core.ids import require_uuid_path_params
 from core.limiter import limiter
 from services.receipt_store_service import save_receipt, get_receipts, get_receipt, delete_receipt
 from services import ocr_service
 
-router = APIRouter(prefix="/receipts", tags=["영수증 저장"])
+router = APIRouter(prefix="/receipts", tags=["영수증 저장"], dependencies=[Depends(require_uuid_path_params)])
 
 
 @router.post("/scan")

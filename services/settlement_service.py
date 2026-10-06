@@ -140,8 +140,23 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
     }
 
 
+# 계산이 시작된 뒤(calculating/calculated/done)에는 영수증·참여 차수·정원처럼 금액에 영향을 주는 값을 못 바꾼다.
+LOCKED_STATUSES = ("calculating", "calculated", "done")
+
+
+def ensure_not_locked(settlement: dict):
+    if settlement.get("status") in LOCKED_STATUSES:
+        raise HTTPException(status_code=400, detail="정산 계산이 시작된 뒤에는 수정할 수 없습니다")
+
+
 async def update_status(settlement_id: str, status: str, user_id: str) -> dict:
-    _check_owner(settlement_id, user_id)
+    settlement = _check_owner(settlement_id, user_id)
+
+    # 이 엔드포인트로는 스캔 단계(scanning ↔ waiting)만 오갈 수 있다. calculating/calculated는 계산(/calculate)이,
+    # done은 /done이 정한다 — 예전엔 아무 상태로나 바꿀 수 있어 계산 없이 완료하거나 완료된 방을 되돌릴 수 있었다.
+    status = getattr(status, "value", status)
+    if status not in ("scanning", "waiting") or settlement.get("status") not in ("scanning", "waiting"):
+        raise HTTPException(status_code=400, detail="변경할 수 없는 정산 상태입니다")
 
     result = supabase_admin.table("settlements") \
         .update({"status": status}).eq("id", settlement_id).execute()
@@ -158,7 +173,7 @@ async def update_settlement(settlement_id: str, title: str, user_id: str) -> dic
 
 async def set_member_capacity(settlement_id: str, member_capacity: int, user_id: str) -> dict:
     """방장이 정원(총 인원)을 설정 — 이후 join이 이 값을 초과하지 못하게 막는다(add_member)."""
-    _check_owner(settlement_id, user_id)
+    ensure_not_locked(_check_owner(settlement_id, user_id))
 
     result = supabase_admin.table("settlements") \
         .update({"member_capacity": member_capacity}).eq("id", settlement_id).execute()
@@ -265,9 +280,15 @@ async def delete_round(settlement_id: str, round: int, user_id: str) -> dict:
     return {"message": "영수증 삭제 완료", "total_amount": total, "round_count": len(remaining)}
 
 
+def _existing_rounds(settlement_id: str) -> set:
+    """이 정산방에 실제로 등록된 차수 번호들."""
+    rows = supabase_admin.table("receipts").select("round").eq("settlement_id", settlement_id).execute()
+    return {r["round"] for r in rows.data}
+
+
 async def set_member_rounds(settlement_id: str, user_id: str, rounds: list) -> dict:
     """참여자 본인이 참여한 라운드 집합을 지정한다(RoundPick 화면). 없으면 insert, 빠지면 delete."""
-    _check_member(settlement_id, user_id)
+    ensure_not_locked(_check_member(settlement_id, user_id))
 
     member = supabase_admin.table("settlement_members") \
         .select("id").eq("settlement_id", settlement_id).eq("user_id", user_id).execute()
@@ -276,6 +297,9 @@ async def set_member_rounds(settlement_id: str, user_id: str, rounds: list) -> d
     member_id = member.data[0]["id"]
 
     wanted = {int(r) for r in rounds}
+    missing = wanted - _existing_rounds(settlement_id)
+    if missing:
+        raise HTTPException(status_code=400, detail="없는 차수가 포함되어 있습니다")
     existing = supabase_admin.table("settlement_member_rounds") \
         .select("round").eq("settlement_member_id", member_id).execute()
     have = {row["round"] for row in existing.data}
@@ -298,13 +322,16 @@ async def set_member_rounds(settlement_id: str, user_id: str, rounds: list) -> d
 
 async def set_member_round_adjustment(settlement_id: str, user_id: str, round: int, excluded_item_names: list) -> dict:
     """참여자 본인이 특정 라운드에서 안 먹은 항목을 지정한다(AmountAdjust 화면)."""
-    _check_member(settlement_id, user_id)
+    ensure_not_locked(_check_member(settlement_id, user_id))
 
     member = supabase_admin.table("settlement_members") \
         .select("id").eq("settlement_id", settlement_id).eq("user_id", user_id).execute()
     if not member.data:
         raise HTTPException(status_code=404, detail="이 정산방의 참여자가 아닙니다")
     member_id = member.data[0]["id"]
+
+    if round not in _existing_rounds(settlement_id):
+        raise HTTPException(status_code=404, detail="해당 차수의 영수증이 없습니다")
 
     names = [str(n)[:50] for n in excluded_item_names][:100]
 
@@ -336,19 +363,36 @@ async def set_member_ready(settlement_id: str, user_id: str) -> dict:
     return result.data[0]
 
 
-def _dedupe_nickname(settlement_id: str, nickname: str) -> str:
+def _dedupe_nickname(settlement_id: str, nickname: str, exclude_member_id: str | None = None) -> str:
     """같은 정산방 안에서 닉네임이 겹치면 AI 정산이 닉네임으로 사람을 구분하지 못해
     한 명의 몫이 다른 동명이인에게 덮어써질 수 있다(계산 무결성 문제) — 겹치면 자동으로 구분자를 붙인다."""
     base = nickname.strip() or "참여자"
     existing = supabase_admin.table("settlement_members") \
-        .select("nickname").eq("settlement_id", settlement_id).execute()
-    taken = {m["nickname"].strip().casefold() for m in existing.data}
+        .select("id, nickname").eq("settlement_id", settlement_id).execute()
+    # 이름을 바꾸는 본인(exclude_member_id)의 현재 이름은 겹침 판정에서 뺀다
+    taken = {m["nickname"].strip().casefold() for m in existing.data if m["id"] != exclude_member_id}
     if base.casefold() not in taken:
         return base
     n = 2
     while f"{base}({n})".casefold() in taken:
         n += 1
     return f"{base}({n})"
+
+
+# 앱이 닉네임을 모를 때 넣는 기본값 — 이미 제대로 된 이름이 있는 멤버를 이 값으로 덮어쓰지 않는다.
+_PLACEHOLDER_NICKNAMES = {"참여자", "사용자"}
+
+
+def _rename_member_if_changed(settlement_row: dict, member: dict, nickname: str):
+    new_name = nickname.strip()
+    if not new_name or new_name in _PLACEHOLDER_NICKNAMES or new_name == member["nickname"]:
+        return
+    # 계산 결과는 닉네임으로 사람을 구분하므로 계산이 시작된 뒤에는 이름을 바꾸지 않는다.
+    if settlement_row.get("status") in LOCKED_STATUSES:
+        return
+    supabase_admin.table("settlement_members") \
+        .update({"nickname": _dedupe_nickname(settlement_row["id"], new_name, exclude_member_id=member["id"])}) \
+        .eq("id", member["id"]).execute()
 
 
 async def add_member(
@@ -363,7 +407,7 @@ async def add_member(
 
     # 중복 참여 방지
     existing = supabase_admin.table("settlement_members") \
-        .select("id").eq("settlement_id", settlement_id).eq("user_id", user_id).execute()
+        .select("id, nickname").eq("settlement_id", settlement_id).eq("user_id", user_id).execute()
 
     # 방장 본인 입장(RoomViewModel.ensureMyMembershipAndAwait)이나 기존 멤버 재입장은
     # 초대 링크 검증 없이 통과시킨다 — 새로 들어오는 비회원만 토큰을 요구.
@@ -412,6 +456,9 @@ async def add_member(
                 )
 
     if existing.data:
+        # 이미 멤버인 사람이 다른 이름으로 다시 들어오면(참여자 입력 화면에서 이름을 고친 경우) 그 이름을 반영한다.
+        # 응답은 예전과 같이 409 — 앱은 409를 "이미 참여 중 = 입장 성공"으로 처리하고 곧바로 정산방을 다시 불러온다.
+        _rename_member_if_changed(settlement_row, existing.data[0], nickname)
         raise HTTPException(status_code=409, detail="이미 참여 중입니다")
 
     result = supabase_admin.table("settlement_members").insert({
@@ -432,7 +479,10 @@ async def remove_member(settlement_id: str, member_user_id: str, requester_id: s
 
 
 async def mark_done(settlement_id: str, user_id: str) -> dict:
-    _check_owner(settlement_id, user_id)
+    current = _check_owner(settlement_id, user_id)
+    # 계산이 끝난 방만 완료할 수 있다(이미 완료된 방을 다시 호출하는 건 그대로 통과).
+    if current.get("status") not in ("calculated", "done"):
+        raise HTTPException(status_code=400, detail="정산 계산이 끝난 뒤에 완료할 수 있습니다")
 
     result = supabase_admin.table("settlements") \
         .update({"status": "done"}).eq("id", settlement_id).execute()

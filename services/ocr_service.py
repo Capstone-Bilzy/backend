@@ -96,18 +96,37 @@ async def scan_only(file: UploadFile) -> dict:
 
 def _check_settlement_owner(settlement_id: str, user_id: str) -> dict:
     settlement = supabase_admin.table("settlements") \
-        .select("id").eq("id", settlement_id).eq("created_by", user_id).execute()
+        .select("id, status").eq("id", settlement_id).eq("created_by", user_id).execute()
     if not settlement.data:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
     return settlement.data[0]
 
 
-def _get_or_create_receipt(settlement_id: str, round: int) -> dict:
-    """정산방의 특정 라운드 receipts row를 찾거나 없으면 만든다."""
+def _check_editable_owner(settlement_id: str, user_id: str) -> dict:
+    """소유자 확인 + 계산이 시작된 뒤에는 영수증 내용을 못 바꾸게 막는다."""
+    from services.settlement_service import ensure_not_locked
+    settlement = _check_settlement_owner(settlement_id, user_id)
+    ensure_not_locked(settlement)
+    return settlement
+
+
+def _get_or_create_receipt(settlement_id: str, round: int, create: bool = True) -> dict:
+    """정산방의 특정 라운드 receipts row를 찾거나 없으면 만든다.
+
+    새 차수는 지금 있는 마지막 차수 바로 다음 번호로만 만들 수 있다(1·2차만 있는데 5차를 만드는 식의
+    건너뛰기 금지). create=False면 없는 차수는 만들지 않고 404.
+    """
     existing = supabase_admin.table("receipts") \
         .select("*").eq("settlement_id", settlement_id).eq("round", round).execute()
     if existing.data:
         return existing.data[0]
+    if not create:
+        raise HTTPException(status_code=404, detail="해당 차수의 영수증이 없습니다")
+    rounds = supabase_admin.table("receipts") \
+        .select("round").eq("settlement_id", settlement_id).execute()
+    last_round = max((r["round"] for r in rounds.data), default=0)
+    if round > last_round + 1:
+        raise HTTPException(status_code=400, detail="앞 차수 영수증을 먼저 등록해주세요")
     created = supabase_admin.table("receipts").insert({
         "settlement_id": settlement_id,
         "round": round,
@@ -135,7 +154,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user
     verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
 
     # 2. 정산방 소유자 확인 (IDOR 방어)
-    _check_settlement_owner(settlement_id, user_id)
+    _check_editable_owner(settlement_id, user_id)
 
     # 3. Gemini Vision으로 OCR
     ocr_result = await scan_with_gemini(contents, file.content_type)
@@ -194,28 +213,25 @@ async def confirm_ocr(settlement_id: str, round: int, store_name: str, items: li
     """앱에서 ML Kit OCR 결과 + 수동 수정 후 확정. 이 라운드(receipt)의 항목만 교체한다 —
     다른 라운드의 데이터는 그대로 유지되어 다차 정산이 가능하다."""
 
-    # 정산방 소유자 확인
-    _check_settlement_owner(settlement_id, user_id)
+    # 정산방 소유자 확인 (계산 시작 후엔 수정 불가)
+    _check_editable_owner(settlement_id, user_id)
 
     receipt = _get_or_create_receipt(settlement_id, round)
 
     # 이 라운드 항목만 삭제 후 재삽입
     supabase_admin.table("receipt_items").delete().eq("receipt_id", receipt["id"]).execute()
 
-    # 입력값 검증 후 삽입
+    # 값 범위·형식은 요청 스키마(OcrConfirmItem)에서 이미 검증됨
     validated_items = []
     total = 0
     for item in items:
-        name = str(item.get("name", ""))[:50]
-        price = max(0, min(int(item.get("price", 0)), 10_000_000))
-        quantity = max(1, min(int(item.get("quantity", 1)), 100))
         validated_items.append({
             "receipt_id": receipt["id"],
-            "name": name,
-            "price": price,
-            "quantity": quantity
+            "name": item.name,
+            "price": item.price,
+            "quantity": item.quantity
         })
-        total += price * quantity
+        total += item.price * item.quantity
 
     if validated_items:
         supabase_admin.table("receipt_items").insert(validated_items).execute()
@@ -231,9 +247,9 @@ async def confirm_ocr(settlement_id: str, round: int, store_name: str, items: li
 
 
 async def add_item(settlement_id: str, round: int, name: str, price: int, quantity: int, user_id: str) -> dict:
-    # 정산방 소유자 확인
-    _check_settlement_owner(settlement_id, user_id)
-    receipt = _get_or_create_receipt(settlement_id, round)
+    # 정산방 소유자 확인 (계산 시작 후엔 수정 불가)
+    _check_editable_owner(settlement_id, user_id)
+    receipt = _get_or_create_receipt(settlement_id, round, create=False)
 
     result = supabase_admin.table("receipt_items").insert({
         "receipt_id": receipt["id"],

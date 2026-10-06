@@ -1,6 +1,10 @@
 from pydantic import BaseModel, Field, conint, constr
 from typing import Optional, List
 from enum import Enum
+from core.ids import UUID_PATTERN
+
+# UUID 형식이 아닌 id는 DB까지 가지 않고 422로 거절한다(그대로 넘기면 500이 났다)
+UuidStr = constr(pattern=UUID_PATTERN)
 
 
 # ===== Auth =====
@@ -24,14 +28,22 @@ class RefreshRequest(BaseModel):
 
 # ===== OCR =====
 
+class OcrConfirmItem(BaseModel):
+    # 예전엔 dict를 그대로 받아 서비스에서 조용히 고쳐 저장했다(음수 가격→0, 수량 0→1, 긴 이름 잘림,
+    # 문자열 가격은 500). 이제 잘못된 값은 저장하지 않고 422로 돌려준다.
+    name: constr(strip_whitespace=True, min_length=1, max_length=50)
+    price: int = Field(ge=0, le=10_000_000)  # 0원(서비스 품목)은 허용
+    quantity: int = Field(default=1, ge=1, le=100)
+
+
 class OcrConfirmRequest(BaseModel):
-    settlement_id: str
+    settlement_id: UuidStr
     round: int = Field(default=1, gt=0, le=100)
     store_name: str = Field(default="", max_length=50)
-    items: List[dict]  # [{ name, price, quantity }]
+    items: List[OcrConfirmItem] = Field(min_length=1, max_length=200)
 
 class AddItemRequest(BaseModel):
-    settlement_id: str
+    settlement_id: UuidStr
     round: int = Field(default=1, gt=0, le=100)
     name: str = Field(min_length=1, max_length=50)
     price: int = Field(gt=0, lt=10_000_000)

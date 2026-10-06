@@ -3,6 +3,7 @@ from models.schemas import OcrConfirmRequest, AddItemRequest
 from services import ocr_service
 from core.security import get_current_user
 from core.limiter import limiter
+from core.ids import UUID_PATTERN
 
 router = APIRouter(prefix="/ocr", tags=["OCR"])
 
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/ocr", tags=["OCR"])
 @limiter.limit("10/minute")  # Gemini Vision 호출 — 비용 발생, 남용 차단
 async def scan_receipt(
     request: Request,
-    settlement_id: str,
+    settlement_id: str = Query(pattern=UUID_PATTERN),
     round: int = Query(default=1, gt=0, le=100),
     file: UploadFile = File(...),
     current_user=Depends(get_current_user)
@@ -39,7 +40,7 @@ async def add_item(request: Request, body: AddItemRequest, current_user=Depends(
 @limiter.limit("20/minute")
 async def attach_receipt_photo(
     request: Request,
-    settlement_id: str,
+    settlement_id: str = Query(pattern=UUID_PATTERN),
     file: UploadFile = File(...),
     current_user=Depends(get_current_user)
 ):

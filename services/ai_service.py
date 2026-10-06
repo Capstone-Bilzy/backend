@@ -81,6 +81,8 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
 
     s = settlement.data[0]
+    if s.get("status") == "done":
+        raise HTTPException(status_code=400, detail="이미 완료된 정산입니다")
 
     # 라운드(영수증)별 항목 조회
     receipts = _load_receipts_with_items(settlement_id)

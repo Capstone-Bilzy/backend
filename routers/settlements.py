@@ -5,9 +5,10 @@ from models.schemas import (
 )
 from services import settlement_service, ai_service, qr_service
 from core.security import get_current_user
+from core.ids import require_uuid_path_params
 from core.limiter import limiter
 
-router = APIRouter(prefix="/settlements", tags=["정산방"])
+router = APIRouter(prefix="/settlements", tags=["정산방"], dependencies=[Depends(require_uuid_path_params)])
 
 
 @router.post("")
