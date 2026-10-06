@@ -43,3 +43,28 @@ def signed_receipt_url(stored: str | None, expires_in: int = SIGNED_TTL) -> str 
         return url
     except Exception as e:
         logger.error(f"receipt signed url 발급 실패: path={path!r}, error={e}")
+
+
+def remove_settlement_files(settlement_id: str) -> int:
+    """정산방에 딸린 영수증 이미지(차수별 사진·추가 첨부)를 스토리지에서 모두 지우고 지운 개수를 돌려준다.
+
+    DB 행만 지우면 이미지가 버킷에 남는다 — 영수증에는 상호·결제 내역이 들어 있으므로 방을 지우면 같이 지운다.
+    실패해도 방 삭제 자체는 막지 않는다(호출 측에서 예외를 삼킨다).
+    """
+    bucket = supabase_admin.storage.from_(BUCKET)
+    root = f"receipts/{settlement_id}"
+    paths = []
+    for entry in bucket.list(root, {"limit": 1000}) or []:
+        name = entry.get("name")
+        if not name:
+            continue
+        if entry.get("id") is None:  # 폴더(차수 번호, extra)
+            for child in bucket.list(f"{root}/{name}", {"limit": 1000}) or []:
+                if child.get("name"):
+                    paths.append(f"{root}/{name}/{child['name']}")
+        else:  # 예전 구조: 방 폴더 바로 아래 파일
+            paths.append(f"{root}/{name}")
+    if paths:
+        bucket.remove(paths)
+    return len(paths)
+

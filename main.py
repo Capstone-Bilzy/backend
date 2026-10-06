@@ -4,6 +4,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from core.limiter import limiter
 from core.config import settings
+from core.body_limit import BodySizeLimitMiddleware
 from routers import auth, ocr, settlements, users
 from routers import account_router, receipts_router  # ← 한 줄로 합치기
 import logging
@@ -32,6 +33,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 본문 크기 제한 — 거대한 업로드가 핸들러에 닿기 전에 끊는다(core/body_limit.py)
+app.add_middleware(BodySizeLimitMiddleware)
 
 # 라우터 등록
 app.include_router(auth.router)

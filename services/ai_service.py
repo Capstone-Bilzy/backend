@@ -7,6 +7,8 @@ from core.config import settings
 from core.database import supabase_admin
 import logging
 
+from services.ocr_service import item_total
+
 logger = logging.getLogger(__name__)
 
 _client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -41,7 +43,7 @@ def calculate_without_ai(rounds_payload: list) -> dict:
         shares = {n: 0.0 for n in names}
         round_total = 0
         for item in r.get("items") or []:
-            line_total = int(item["price"]) * int(item["quantity"])
+            line_total = item_total(item)
             round_total += line_total
             eaters = [n for n in names if item["name"] not in excluded[n]] or names
             for n in eaters:
@@ -115,7 +117,11 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
         rounds_payload.append({
             "round": r["round"],
             "store_name": r.get("store_name") or "",
-            "items": [{"name": i["name"], "price": i["price"], "quantity": i["quantity"]} for i in r["items"]],
+            # amount = 그 줄의 금액(계산에는 이 값을 쓴다). 단가로 나누어떨어지지 않는 줄은 price*quantity와 다르다.
+            "items": [
+                {"name": i["name"], "price": i["price"], "quantity": i["quantity"], "amount": item_total(i)}
+                for i in r["items"]
+            ],
             "participants": participants,
         })
 
@@ -156,6 +162,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 규칙:
 1. 각 라운드는 그 라운드의 participants에 있는 사람들끼리만 나눠 낸다 (참여 안 한 라운드는 0원).
 2. 라운드별 excluded_items에 있는 항목은 그 사람 몫에서 빼고, 나머지 항목만 균등 분배한다.
+   각 항목의 금액은 items의 amount 값이다(price×quantity를 다시 계산하지 말 것).
 3. 각 라운드 금액의 합은 그 라운드 항목 총액과 일치해야 한다 (원 단위 반올림 허용).
 4. 한 사람의 최종 금액(results)은 그 사람이 참여한 모든 라운드 금액의 합이어야 한다.
 

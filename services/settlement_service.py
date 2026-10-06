@@ -1,7 +1,8 @@
 from fastapi import HTTPException
 from core.database import supabase_admin
-from core.storage import signed_receipt_url
+from core.storage import signed_receipt_url, remove_settlement_files
 from core.privacy import decrypt
+from core.access_logger import log_access
 import logging
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,34 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
         "items": flat_items,
         "receipts": receipts,
         "extra_photos": extra_photos,
+        "payer_account": await _payer_account(settlement, user_id),
+    }
+
+
+async def _payer_account(settlement: dict, requester_id: str) -> dict | None:
+    """결제자(방장)의 송금 계좌 — 참여자가 돈을 보낼 곳.
+
+    이 정산방 멤버에게만(get_settlement의 _check_member 통과 후), 그리고 금액이 확정된 뒤
+    (calculated/done)에만 내려준다. 그 전에는 보낼 금액이 없으므로 계좌번호를 노출하지 않는다.
+    방장이 계좌를 등록하지 않았으면 None.
+    """
+    if settlement.get("status") not in ("calculated", "done"):
+        return None
+    owner_id = settlement["created_by"]
+    owner = supabase_admin.table("users") \
+        .select("bank_name, account_number, account_holder").eq("id", owner_id).execute()
+    if not owner.data:
+        return None
+    row = owner.data[0]
+    number = decrypt(row["account_number"]) if row.get("account_number") else ""
+    if not number:
+        return None
+    if requester_id != owner_id:
+        await log_access(requester_id, "READ", "account", owner_id)
+    return {
+        "bank_name": row.get("bank_name") or "",
+        "account_number": number,
+        "account_holder": row.get("account_holder") or "",
     }
 
 
@@ -195,9 +224,17 @@ async def delete_settlement(settlement_id: str, user_id: str):
     if member_ids:
         supabase_admin.table("settlement_member_rounds").delete().in_("settlement_member_id", member_ids).execute()
     supabase_admin.table("settlement_members").delete().eq("settlement_id", settlement_id).execute()
+    supabase_admin.table("settlement_extra_photos").delete().eq("settlement_id", settlement_id).execute()
     supabase_admin.table("settlements").delete().eq("id", settlement_id).execute()
 
-    logger.info(f"SETTLEMENT_DELETED id={settlement_id} user={user_id[:8]}***")
+    # 스토리지에 올라간 영수증 이미지도 함께 지운다(예전엔 DB 행만 지워 이미지가 버킷에 남았다).
+    removed = 0
+    try:
+        removed = remove_settlement_files(settlement_id)
+    except Exception as e:
+        logger.error(f"Settlement files remove failed for {settlement_id}: {e}")
+
+    logger.info(f"SETTLEMENT_DELETED id={settlement_id} files={removed} user={user_id[:8]}***")
 
 
 async def delete_receipt_image(settlement_id: str, round: int, user_id: str):

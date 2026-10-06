@@ -5,14 +5,12 @@ from fastapi import HTTPException, UploadFile
 from core.database import supabase_admin
 from core.config import settings
 from core.storage import signed_receipt_url
-from core.image_validation import verify_image
+from core.image_validation import read_upload, SANITIZED_MIME
 import uuid, json
 import logging
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_EXTRA_PHOTOS = 30  # 정산방당 순수 첨부 사진 개수 상한(스토리지 남용 방지)
 
 # Gemini 클라이언트
@@ -26,6 +24,8 @@ OCR_PROMPT = """
 - 수량이 명시된 경우 quantity에 반영
 - 가격은 숫자만 (원 기호, 쉼표 제외)
 - 인식 불가한 항목은 포함하지 마
+- 금액이 0원인 줄(이벤트·사은품·서비스·"단품" 같은 옵션 줄)은 포함하지 마
+- 상품명 아래에 따로 찍힌 상품코드(숫자만 있는 줄)는 메뉴가 아니니 무시해
 
 반드시 아래 JSON 형식으로만 응답해. 다른 텍스트 절대 포함하지 마.
 {
@@ -48,6 +48,9 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 OCR_PROMPT,
             ],
+            # temperature 0: 같은 사진이면 같은 결과가 나오게 한다. 기본값에서는 화질이 애매한 영수증의
+            # 한글 품목명이 호출할 때마다 달라졌다(리뷰이벤트 → 고리빅이벤트/앙버터이벤트 등).
+            config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json"),
         )
         raw = response.text.strip()
 
@@ -65,6 +68,11 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
             item["price"] = int(item["price"])
             item["quantity"] = int(item["quantity"])
 
+        # 0원인 줄(리뷰이벤트·옵션 등)은 정산에 영향이 없으므로 품목에서 뺀다(프롬프트로도 막지만 한 번 더 거른다).
+        result["items"] = [
+            i for i in result.get("items", []) if i["price"] > 0 and i["quantity"] > 0
+        ]
+
         return result
 
     except json.JSONDecodeError:
@@ -79,15 +87,11 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
 
 async def scan_only(file: UploadFile) -> dict:
     """정산방과 무관한 독립 OCR. 보관함 저장 전 금액 프리필용으로 items/total만 반환(저장 없음)."""
-    if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
+    # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
+    # (위장 파일·폴리글랏·EXIF 위치정보 차단 — core/image_validation.py).
+    contents = await read_upload(file)
 
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
-    verify_image(contents)  # content-type 헤더 위조 방어
-
-    ocr_result = await scan_with_gemini(contents, file.content_type)
+    ocr_result = await scan_with_gemini(contents, SANITIZED_MIME)
     total = ocr_result.get("total", sum(
         i["price"] * i["quantity"] for i in ocr_result.get("items", [])
     ))
@@ -134,6 +138,12 @@ def _get_or_create_receipt(settlement_id: str, round: int, create: bool = True) 
     return created.data[0]
 
 
+def item_total(item: dict) -> int:
+    """품목 한 줄의 금액. line_amount가 있으면 그 값(단가로 나누어떨어지지 않는 줄), 없으면 단가×수량."""
+    line_amount = item.get("line_amount")
+    return int(line_amount) if line_amount is not None else int(item["price"]) * int(item["quantity"])
+
+
 def _recompute_settlement_total(settlement_id: str):
     """모든 라운드(receipts) 합계를 settlements.total_amount에 반영한다."""
     receipts = supabase_admin.table("receipts") \
@@ -144,20 +154,16 @@ def _recompute_settlement_total(settlement_id: str):
 
 
 async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user_id: str) -> dict:
-    # 1. 입력 검증
-    if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
-
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
-    verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
-
-    # 2. 정산방 소유자 확인 (IDOR 방어)
+    # 1. 정산방 소유자 확인 (IDOR 방어) — 권한 없는 요청은 이미지를 디코딩하기 전에 끊는다
     _check_editable_owner(settlement_id, user_id)
 
+    # 2. 입력 검증
+    # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
+    # (위장 파일·폴리글랏·EXIF 위치정보 차단 — core/image_validation.py).
+    contents = await read_upload(file)
+
     # 3. Gemini Vision으로 OCR
-    ocr_result = await scan_with_gemini(contents, file.content_type)
+    ocr_result = await scan_with_gemini(contents, SANITIZED_MIME)
 
     # 항목을 하나도 못 읽었으면 "인식 성공(빈 결과)"이 아니라 실패로 취급한다 —
     # 그래야 앱이 RecognizingFragment의 재촬영/직접입력 폴백을 보여준다.
@@ -169,7 +175,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user
     #    조회 시 settlement_service가 멤버에게만 단기 signed URL을 발급한다.
     file_path = f"receipts/{settlement_id}/{round}/{uuid.uuid4()}.jpg"
     supabase_admin.storage.from_("receipts").upload(
-        file_path, contents, {"content-type": file.content_type}
+        file_path, contents, {"content-type": SANITIZED_MIME}
     )
 
     # 5. 이 라운드의 receipts row에 OCR 결과 반영
@@ -225,16 +231,20 @@ async def confirm_ocr(settlement_id: str, round: int, store_name: str, items: li
     validated_items = []
     total = 0
     for item in items:
-        validated_items.append({
+        row = {
             "receipt_id": receipt["id"],
             "name": item.name,
             "price": item.price,
             "quantity": item.quantity
-        })
-        total += item.price * item.quantity
+        }
+        # 단가×수량과 같은 값이면 굳이 저장하지 않는다(컬럼은 "표현 못 하는 줄"에만 쓴다).
+        if item.line_amount is not None and item.line_amount != item.price * item.quantity:
+            row["line_amount"] = item.line_amount
+        validated_items.append(row)
+        total += item_total(row)
 
     if validated_items:
-        supabase_admin.table("receipt_items").insert(validated_items).execute()
+        _insert_items(validated_items)
 
     # 이 라운드의 가게명/총액 갱신, 정산방 전체 총액 재계산
     supabase_admin.table("receipts").update({
@@ -244,6 +254,32 @@ async def confirm_ocr(settlement_id: str, round: int, store_name: str, items: li
     settlement_total = _recompute_settlement_total(settlement_id)
 
     return {"round": round, "total_amount": total, "settlement_total_amount": settlement_total, "items": validated_items}
+
+
+def _insert_items(rows: list):
+    """receipt_items 삽입. 한 요청 안에서 키 구성이 달라지지 않게 line_amount가 하나라도 있으면 전부에 채운다.
+
+    line_amount 컬럼이 아직 없는 DB(schema_line_amount.sql 미적용)에서는 삽입이 실패하므로,
+    그때는 예전 방식(금액 그대로 × 1개)으로 바꿔 저장해 금액만은 틀어지지 않게 한다.
+    """
+    if not any("line_amount" in r for r in rows):
+        supabase_admin.table("receipt_items").insert(rows).execute()
+        return
+    full = [{**r, "line_amount": r.get("line_amount")} for r in rows]
+    try:
+        supabase_admin.table("receipt_items").insert(full).execute()
+    except Exception as e:
+        if "line_amount" not in str(e):
+            raise
+        logger.warning("receipt_items.line_amount 컬럼이 없어 '금액×1개'로 저장합니다(schema_line_amount.sql 적용 필요)")
+        fallback = []
+        for r in rows:
+            if r.get("line_amount") is not None:
+                fallback.append({"receipt_id": r["receipt_id"], "name": r["name"], "price": r["line_amount"], "quantity": 1})
+            else:
+                fallback.append({k: v for k, v in r.items() if k != "line_amount"})
+        rows[:] = fallback
+        supabase_admin.table("receipt_items").insert(fallback).execute()
 
 
 async def add_item(settlement_id: str, round: int, name: str, price: int, quantity: int, user_id: str) -> dict:
@@ -260,8 +296,8 @@ async def add_item(settlement_id: str, round: int, name: str, price: int, quanti
 
     # 이 라운드 총액 재계산 후 정산방 합계 갱신
     items = supabase_admin.table("receipt_items") \
-        .select("price, quantity").eq("receipt_id", receipt["id"]).execute()
-    round_total = sum(i["price"] * i["quantity"] for i in items.data)
+        .select("*").eq("receipt_id", receipt["id"]).execute()
+    round_total = sum(item_total(i) for i in items.data)
     supabase_admin.table("receipts").update({"total_amount": round_total}).eq("id", receipt["id"]).execute()
     _recompute_settlement_total(settlement_id)
 
@@ -271,15 +307,12 @@ async def add_item(settlement_id: str, round: int, name: str, price: int, quanti
 async def attach_receipt_photo(settlement_id: str, file: UploadFile, user_id: str) -> dict:
     """정산방에 영수증 사진만 순수 기록용으로 첨부한다(OCR·금액 계산 없음).
     receipts(라운드)와 무관한 별도 테이블에 저장 — 정산 계산·참여자 몫에 전혀 영향을 주지 않는다."""
-    if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
-
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
-    verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
-
+    # 권한 없는 요청은 이미지를 디코딩하기 전에 끊는다
     _check_settlement_owner(settlement_id, user_id)
+
+    # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
+    # (위장 파일·폴리글랏·EXIF 위치정보 차단 — core/image_validation.py).
+    contents = await read_upload(file)
 
     existing_count = supabase_admin.table("settlement_extra_photos") \
         .select("id", count="exact").eq("settlement_id", settlement_id).execute()
@@ -288,7 +321,7 @@ async def attach_receipt_photo(settlement_id: str, file: UploadFile, user_id: st
 
     file_path = f"receipts/{settlement_id}/extra/{uuid.uuid4()}.jpg"
     supabase_admin.storage.from_("receipts").upload(
-        file_path, contents, {"content-type": file.content_type}
+        file_path, contents, {"content-type": SANITIZED_MIME}
     )
 
     supabase_admin.table("settlement_extra_photos").insert({

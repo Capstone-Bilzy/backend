@@ -17,7 +17,9 @@ async def scan(request: Request, file: UploadFile = File(...), current_user=Depe
 
 
 @router.post("")
+@limiter.limit("20/minute")  # 파일 저장 — 스토리지 남용 차단
 async def save(
+    request: Request,
     file: UploadFile = File(...),
     store_name: Optional[str] = Form(None),
     total_amount: Optional[int] = Form(None),

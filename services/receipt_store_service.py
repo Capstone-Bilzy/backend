@@ -1,14 +1,12 @@
 from fastapi import HTTPException, UploadFile
 from core.database import supabase_admin
 from core.storage import signed_receipt_url
-from core.image_validation import verify_image
+from core.image_validation import read_upload, SANITIZED_MIME
 import uuid
 import logging
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 async def save_receipt(
@@ -18,18 +16,14 @@ async def save_receipt(
     total_amount: int | None = None,
 ) -> dict:
     """영수증 보관함 저장. 가게명·총액은 OCR 후 사용자 수동확인 값(선택)."""
-    if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail="jpg, png, webp만 지원합니다")
-
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="파일 크기는 10MB 이하여야 합니다")
-    verify_image(contents)  # content-type 헤더 위조 방어 — 실제 이미지 바이트인지 검증
+    # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
+    # (위장 파일·폴리글랏·EXIF 위치정보 차단 — core/image_validation.py).
+    contents = await read_upload(file)
 
     # private 버킷 — 공개 URL을 저장하지 않고 in-bucket 경로(file_path)만 보관, 조회 시 서명.
     file_path = f"saved_receipts/{user_id}/{uuid.uuid4()}.jpg"
     supabase_admin.storage.from_("receipts").upload(
-        file_path, contents, {"content-type": file.content_type}
+        file_path, contents, {"content-type": SANITIZED_MIME}
     )
 
     # 사용자 입력 값 정제 — 가게명 100자 컷, 총액 0~1억 클램프(음수/과대 방어).

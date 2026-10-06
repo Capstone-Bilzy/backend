@@ -34,6 +34,8 @@ class OcrConfirmItem(BaseModel):
     name: constr(strip_whitespace=True, min_length=1, max_length=50)
     price: int = Field(ge=0, le=10_000_000)  # 0원(서비스 품목)은 허용
     quantity: int = Field(default=1, ge=1, le=100)
+    # 그 줄의 금액이 수량으로 나누어떨어지지 않을 때만 온다(3개 10,000원). 없으면 price*quantity.
+    line_amount: Optional[int] = Field(default=None, ge=0, le=1_000_000_000)
 
 
 class OcrConfirmRequest(BaseModel):
