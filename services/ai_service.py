@@ -43,7 +43,7 @@ def calculate_without_ai(rounds_payload: list) -> dict:
         shares = {n: 0.0 for n in names}
         round_total = 0
         for item in r.get("items") or []:
-            line_total = item_total(item)
+            line_total = int(item["amount"]) if "amount" in item else item_total(item)
             round_total += line_total
             eaters = [n for n in names if item["name"] not in excluded[n]] or names
             for n in eaters:
@@ -71,6 +71,36 @@ def calculate_without_ai(rounds_payload: list) -> dict:
         ],
         "summary": "참여한 차수와 안 먹은 항목을 기준으로 계산했어요",
     }
+
+
+def _round_sum_mismatch(result: dict, rounds_payload: list) -> list:
+    """AI 결과의 차수별 금액 합이 그 차수 품목 금액 합과 다른 차수를 [(차수, 기대, 실제)]로 돌려준다(없으면 빈 목록).
+
+    참여자가 없는 차수는 아무도 내지 않으므로 검사하지 않는다. 그 차수 참여자가 아닌 이름에 붙은 금액은
+    어차피 저장 단계에서 버려지므로 합에서도 뺀다.
+    """
+    got = {}
+    for entry in result.get("rounds", []) or []:
+        try:
+            got[int(entry.get("round"))] = entry.get("results") or []
+        except (TypeError, ValueError):
+            continue
+    bad = []
+    for r in rounds_payload:
+        names = {p["nickname"] for p in r["participants"]}
+        if not names:
+            continue
+        expected = sum(int(i["amount"]) for i in r["items"])
+        actual = 0
+        for row in got.get(r["round"], []):
+            if row.get("nickname") in names:
+                try:
+                    actual += int(round(float(row.get("amount", 0))))
+                except (TypeError, ValueError):
+                    pass
+        if actual != expected:
+            bad.append((r["round"], expected, actual))
+    return bad
 
 
 async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dict:
@@ -117,11 +147,9 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
         rounds_payload.append({
             "round": r["round"],
             "store_name": r.get("store_name") or "",
-            # amount = 그 줄의 금액(계산에는 이 값을 쓴다). 단가로 나누어떨어지지 않는 줄은 price*quantity와 다르다.
-            "items": [
-                {"name": i["name"], "price": i["price"], "quantity": i["quantity"], "amount": item_total(i)}
-                for i in r["items"]
-            ],
+            # 품목은 이름과 그 줄의 금액(amount)만 넘긴다. 단가·수량을 같이 주면 모델이 단가×수량을 다시 계산해
+            # 나누어떨어지지 않는 줄(3개 10,000원 → 3333×3 = 9,999원)에서 합계가 1원씩 틀어졌다.
+            "items": [{"name": i["name"], "amount": item_total(i)} for i in r["items"]],
             "participants": participants,
         })
 
@@ -162,8 +190,8 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 규칙:
 1. 각 라운드는 그 라운드의 participants에 있는 사람들끼리만 나눠 낸다 (참여 안 한 라운드는 0원).
 2. 라운드별 excluded_items에 있는 항목은 그 사람 몫에서 빼고, 나머지 항목만 균등 분배한다.
-   각 항목의 금액은 items의 amount 값이다(price×quantity를 다시 계산하지 말 것).
-3. 각 라운드 금액의 합은 그 라운드 항목 총액과 일치해야 한다 (원 단위 반올림 허용).
+   각 항목의 금액은 items의 amount 값이다.
+3. 각 라운드 금액의 합은 그 라운드 항목 amount의 합과 1원도 틀리지 않고 정확히 일치해야 한다 (나누어떨어지지 않는 1원 단위 나머지는 한 사람에게 몰아 준다).
 4. 한 사람의 최종 금액(results)은 그 사람이 참여한 모든 라운드 금액의 합이어야 한다.
 
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 절대 포함하지 마세요:
@@ -190,6 +218,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
             _client.models.generate_content,
             model="gemini-2.5-flash",
             contents=prompt,
+            config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json"),
         )
         raw = response.text.strip()
 
@@ -199,6 +228,11 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
             if raw.startswith("json"):
                 raw = raw[4:]
         result = json.loads(raw.strip())
+
+        # AI가 준 금액이 차수별 영수증 금액과 1원이라도 안 맞으면 버리고 규칙 계산으로 넘어간다(아래 except).
+        mismatch = _round_sum_mismatch(result, rounds_payload)
+        if mismatch:
+            raise ValueError(f"AI round sums do not match receipts: {mismatch}")
 
     except Exception as e:
         # Gemini가 실패하면(한도 초과 429, 과부하 503, 응답 파싱 실패 등) 정산이 멈추지 않도록
