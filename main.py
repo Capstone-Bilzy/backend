@@ -5,6 +5,7 @@ from slowapi.errors import RateLimitExceeded
 from core.limiter import limiter
 from core.config import settings
 from core.body_limit import BodySizeLimitMiddleware
+from core import gemini
 from routers import auth, ocr, settlements, users
 from routers import account_router, receipts_router  # ← 한 줄로 합치기
 import logging
@@ -48,7 +49,9 @@ app.include_router(receipts_router.router)  # ← 추가
 
 @app.get("/health", include_in_schema=False)
 async def health():
-    return {"status": "ok"}
+    # 어떤 코드가 떠 있는지 밖에서 확인할 수 있게 비밀이 아닌 설정만 함께 내려준다
+    # (배포했는데 예전 코드가 돌고 있는 경우를 가려내기 위함 — 키 값은 절대 넣지 않는다).
+    return {"status": "ok", "gemini_models": gemini.model_names(), "ai_calc": "note-only"}
 
 
 @app.middleware("http")

@@ -4,6 +4,7 @@ from google.genai import types
 from fastapi import HTTPException, UploadFile
 from core.database import supabase_admin
 from core.config import settings
+from core import gemini
 from core.storage import signed_receipt_url
 from core.image_validation import read_upload, SANITIZED_MIME
 import uuid, json
@@ -14,7 +15,6 @@ logger = logging.getLogger(__name__)
 MAX_EXTRA_PHOTOS = 30  # 정산방당 순수 첨부 사진 개수 상한(스토리지 남용 방지)
 
 # Gemini 클라이언트
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 OCR_PROMPT = """
 이 영수증 이미지에서 메뉴명과 가격을 추출해줘. 한국어 영수증이야.
@@ -42,8 +42,7 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
     try:
         # 동기 SDK 호출을 스레드로 넘겨, OCR이 도는 동안에도 서버가 다른 요청을 받게 한다.
         response = await asyncio.to_thread(
-            _client.models.generate_content,
-            model="gemini-2.5-flash",
+            gemini.generate,
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 OCR_PROMPT,
@@ -72,6 +71,7 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
         result["items"] = [
             i for i in result.get("items", []) if i["price"] > 0 and i["quantity"] > 0
         ]
+        _fix_amount_read_as_unit_price(result)
 
         return result
 
@@ -85,6 +85,34 @@ async def scan_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
         raise HTTPException(status_code=500, detail="OCR 처리 중 오류가 발생했습니다")
 
 
+def _fix_amount_read_as_unit_price(result: dict):
+    """모델이 "금액" 열(단가×수량)을 단가로 읽어 온 경우를 영수증 합계로 가려내 바로잡는다.
+
+    단가·수량·금액 열이 다 있는 영수증에서 가벼운 모델이 price에 금액을 넣곤 한다
+    (생맥주 3,000×2=6,000 → price 6000, quantity 2 → 12,000으로 두 배 계산).
+    단가×수량의 합은 영수증 합계와 다른데 price의 합이 합계와 정확히 같으면 price가 금액이었다는 뜻이므로,
+    단가 = 금액÷수량으로 되돌리고 나누어떨어지지 않는 줄은 금액을 line_amount에 그대로 둔다.
+    """
+    items = result.get("items") or []
+    try:
+        total = int(result.get("total"))
+    except (TypeError, ValueError):
+        return
+    if total <= 0 or not items:
+        return
+    if sum(i["price"] * i["quantity"] for i in items) == total:
+        return
+    if sum(i["price"] for i in items) != total:
+        return
+    for i in items:
+        amount, quantity = i["price"], i["quantity"]
+        if quantity > 1:
+            i["price"] = amount // quantity
+            if amount % quantity:
+                i["line_amount"] = amount
+    logger.info("OCR_AMOUNT_COLUMN_FIXED 금액 열을 단가로 읽은 결과를 합계 기준으로 보정")
+
+
 async def scan_only(file: UploadFile) -> dict:
     """정산방과 무관한 독립 OCR. 보관함 저장 전 금액 프리필용으로 items/total만 반환(저장 없음)."""
     # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
@@ -92,9 +120,7 @@ async def scan_only(file: UploadFile) -> dict:
     contents = await read_upload(file)
 
     ocr_result = await scan_with_gemini(contents, SANITIZED_MIME)
-    total = ocr_result.get("total", sum(
-        i["price"] * i["quantity"] for i in ocr_result.get("items", [])
-    ))
+    total = ocr_result.get("total", sum(item_total(i) for i in ocr_result.get("items", [])))
     return {"items": ocr_result.get("items", []), "total": total}
 
 
@@ -179,9 +205,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user
     )
 
     # 5. 이 라운드의 receipts row에 OCR 결과 반영
-    total = ocr_result.get("total", sum(
-        i["price"] * i["quantity"] for i in ocr_result.get("items", [])
-    ))
+    total = ocr_result.get("total", sum(item_total(i) for i in ocr_result.get("items", [])))
     receipt = _get_or_create_receipt(settlement_id, round)
     supabase_admin.table("receipts").update({
         "receipt_image_url": file_path,
@@ -191,15 +215,18 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user
     # 6. 이 라운드의 항목만 교체 (다른 라운드는 건드리지 않음)
     supabase_admin.table("receipt_items").delete().eq("receipt_id", receipt["id"]).execute()
     if ocr_result.get("items"):
-        supabase_admin.table("receipt_items").insert([
-            {
+        rows = []
+        for item in ocr_result["items"]:
+            row = {
                 "receipt_id": receipt["id"],
                 "name": item["name"][:50],
                 "price": max(0, min(item["price"], 10_000_000)),
                 "quantity": max(1, min(item["quantity"], 100)),
             }
-            for item in ocr_result["items"]
-        ]).execute()
+            if item.get("line_amount") is not None:
+                row["line_amount"] = max(0, min(int(item["line_amount"]), 1_000_000_000))
+            rows.append(row)
+        _insert_items(rows)
 
     _recompute_settlement_total(settlement_id)
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 from fastapi import HTTPException
 from core.config import settings
+from core import gemini
 from core.database import supabase_admin
 import logging
 
@@ -11,7 +12,6 @@ from services.ocr_service import item_total
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 
 def _is_quota_error(error: Exception) -> bool:
@@ -73,6 +73,10 @@ def calculate_without_ai(rounds_payload: list) -> dict:
     }
 
 
+class _SkipAI(Exception):
+    """특이사항이 없어 AI 없이 규칙 계산으로 바로 가는 경우의 내부 신호."""
+
+
 def _round_sum_mismatch(result: dict, rounds_payload: list) -> list:
     """AI 결과의 차수별 금액 합이 그 차수 품목 금액 합과 다른 차수를 [(차수, 기대, 실제)]로 돌려준다(없으면 빈 목록).
 
@@ -101,6 +105,33 @@ def _round_sum_mismatch(result: dict, rounds_payload: list) -> list:
         if actual != expected:
             bad.append((r["round"], expected, actual))
     return bad
+
+
+def _differs_from_rule(result: dict, rounds_payload: list) -> list:
+    """AI 결과의 사람별·차수별 금액이 규칙 계산과 다른 항목을 [(차수, 이름, 규칙, AI)]로 돌려준다.
+
+    나누어떨어지지 않는 1원 단위 나머지를 누구에게 주느냐는 다를 수 있으므로 1원 차이는 허용한다.
+    """
+    expected = {
+        (r["round"], row["nickname"]): int(row["amount"])
+        for r in calculate_without_ai(rounds_payload)["rounds"] for row in r["results"]
+    }
+    actual = {}
+    for entry in result.get("rounds", []) or []:
+        try:
+            round_no = int(entry.get("round"))
+        except (TypeError, ValueError):
+            continue
+        for row in entry.get("results") or []:
+            try:
+                actual[(round_no, row.get("nickname"))] = int(round(float(row.get("amount", 0))))
+            except (TypeError, ValueError):
+                actual[(round_no, row.get("nickname"))] = None
+    return [
+        (round_no, nick, want, actual.get((round_no, nick)))
+        for (round_no, nick), want in expected.items()
+        if actual.get((round_no, nick)) is None or abs(actual[(round_no, nick)] - want) > 1
+    ]
 
 
 async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dict:
@@ -213,10 +244,14 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 
     used_fallback = False
     try:
+        # 자유 문장 특이사항(ai_note)이 없으면 답이 규칙 계산 하나로 정해지므로 AI를 부르지 않는다.
+        # (안 먹은 메뉴·참여 차수는 이미 구조화된 값으로 들어와 규칙 계산이 그대로 반영한다.)
+        # AI는 사람이 글로 적은 특이사항을 해석해야 할 때만 쓴다 — 계산이 즉시 끝나고 한도도 아낀다.
+        if not (ai_note or "").strip():
+            raise _SkipAI()
         # 동기 SDK 호출을 스레드로 넘겨, 계산이 도는 동안에도 서버가 다른 요청(멤버들의 상태 조회 등)을 받게 한다.
         response = await asyncio.to_thread(
-            _client.models.generate_content,
-            model="gemini-2.5-flash",
+            gemini.generate,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json"),
         )
@@ -233,7 +268,16 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
         mismatch = _round_sum_mismatch(result, rounds_payload)
         if mismatch:
             raise ValueError(f"AI round sums do not match receipts: {mismatch}")
+        # 자유 특이사항(ai_note)이 없으면 정답은 규칙 계산 하나뿐이다. 합계가 맞아도 사람별 금액이 규칙과 다르면
+        # (예: 맥주를 안 마신 사람에게 맥주값을 물린 경우 — 가벼운 모델에서 실제로 나왔다) AI 결과를 버린다.
+        if not (ai_note or "").strip():
+            wrong = _differs_from_rule(result, rounds_payload)
+            if wrong:
+                raise ValueError(f"AI per-member amounts differ from rule-based split: {wrong}")
 
+    except _SkipAI:
+        result = calculate_without_ai(rounds_payload)
+        used_fallback = True
     except Exception as e:
         # Gemini가 실패하면(한도 초과 429, 과부하 503, 응답 파싱 실패 등) 정산이 멈추지 않도록
         # 같은 규칙을 서버에서 직접 계산하는 예비 경로로 넘어간다.
