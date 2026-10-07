@@ -19,6 +19,7 @@ app = FastAPI(
     title="Bilzy API",
     version="1.0.0",
     docs_url="/docs" if settings.DEBUG else None,
+    openapi_url="/openapi.json" if settings.DEBUG else None,  # 운영에서는 API 명세도 공개하지 않는다
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 

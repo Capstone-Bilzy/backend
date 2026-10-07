@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     GEMINI_MODELS: str = "gemini-3-flash-preview,gemini-3.6-flash,gemini-3.5-flash,gemini-3.8-flash"
 
     KAKAO_CLIENT_ID: str
+    # 카카오 개발자 콘솔의 숫자 앱 ID(비밀 값 아님). 로그인에 쓰인 카카오 토큰이 이 앱에서 발급된 것인지 확인한다.
+    # 0으로 두면 확인을 건너뛴다(문제가 생겼을 때 환경변수 KAKAO_APP_ID=0 으로 바로 끌 수 있게).
+    KAKAO_APP_ID: int = 1468714
     NAVER_CLIENT_ID: str
     NAVER_CLIENT_SECRET: str
 

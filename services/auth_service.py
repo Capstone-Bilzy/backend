@@ -2,6 +2,7 @@ import httpx
 from fastapi import HTTPException
 from core.database import supabase_admin
 from core.security import create_access_token, create_refresh_token, invalidate_user_cache
+from core.config import settings
 from core.privacy import encrypt_user, decrypt_user, pseudonymize, encrypt
 import logging
 from datetime import datetime
@@ -9,8 +10,29 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+async def _verify_kakao_token_app(client: httpx.AsyncClient, access_token: str):
+    """카카오 토큰이 우리 앱(KAKAO_APP_ID)에서 발급된 것인지 확인한다.
+
+    `v2/user/me`는 어느 앱이 발급한 토큰이든 성공한다. 이 확인이 없으면 다른 앱(공격자가 만든 앱)에
+    카카오 로그인한 사람의 토큰을 가져와 우리 서버에 보내는 것만으로 그 사람 계정에 로그인할 수 있다.
+    """
+    if not settings.KAKAO_APP_ID:
+        return
+    res = await client.get(
+        "https://kapi.kakao.com/v1/user/access_token_info",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+    if res.status_code != 200:
+        raise HTTPException(status_code=401, detail="카카오 토큰이 유효하지 않습니다")
+    app_id = res.json().get("app_id")
+    if str(app_id) != str(settings.KAKAO_APP_ID):
+        logger.warning(f"KAKAO_TOKEN_FOREIGN_APP app_id={app_id}")
+        raise HTTPException(status_code=401, detail="카카오 토큰이 유효하지 않습니다")
+
+
 async def get_kakao_user_info(access_token: str) -> dict:
     async with httpx.AsyncClient() as client:
+        await _verify_kakao_token_app(client, access_token)
         res = await client.get(
             "https://kapi.kakao.com/v2/user/me",
             headers={"Authorization": f"Bearer {access_token}"}
