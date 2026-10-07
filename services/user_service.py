@@ -1,4 +1,6 @@
 from fastapi import HTTPException, Request
+from core.storage import remove_settlement_files
+from core.security import invalidate_user_cache
 from core.database import supabase_admin
 from core.privacy import encrypt, decrypt, decrypt_user
 from core.access_logger import log_access
@@ -49,12 +51,14 @@ async def delete_account(user_id: str):
             .select("id, receipt_image_url").in_("settlement_id", settlement_ids).execute()
         for r in receipts.data or []:
             receipt_ids.append(r["id"])
-            if r.get("receipt_image_url"):
-                try:
-                    path = r["receipt_image_url"].split("/receipts/")[-1]
-                    supabase_admin.storage.from_("receipts").remove([f"receipts/{path}"])
-                except Exception:
-                    pass
+
+    # 정산방 폴더를 통째로 지운다(차수별 영수증 + 추가 첨부 사진). 예전엔 경로를 잘못 만들어 하나도 못 지웠고
+    # 추가 첨부 사진은 아예 대상이 아니었다.
+    for sid in settlement_ids:
+        try:
+            remove_settlement_files(sid)
+        except Exception as e:
+            logger.error(f"Account delete: files remove failed for settlement {sid}: {e}")
 
     # 2. 연관 데이터 삭제
     if receipt_ids:
@@ -76,6 +80,7 @@ async def delete_account(user_id: str):
     # 3. 유저 삭제
     supabase_admin.table("users").delete().eq("id", user_id).execute()
 
+    invalidate_user_cache(user_id)  # 탈퇴 직후에도 인증 캐시 때문에 요청이 통과하던 것 방지
     logger.info(f"ACCOUNT_DELETED user={user_id[:8]}*** - 개인정보 즉시 파기 완료")
 
 

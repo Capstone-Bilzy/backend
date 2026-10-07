@@ -10,6 +10,7 @@ FastAPI는 multipart 업로드를 핸들러가 실행되기 전에 통째로 받
 import json
 
 MAX_BODY_BYTES = 12 * 1024 * 1024  # 이미지 10MB + multipart 여유분
+MAX_JSON_BYTES = 256 * 1024        # 파일 업로드가 아닌 요청(JSON)의 상한 — 품목 200개 확정도 수십 KB면 충분하다
 
 
 class BodySizeLimitMiddleware:
@@ -23,10 +24,19 @@ class BodySizeLimitMiddleware:
             return
 
         headers = dict(scope.get("headers") or [])
+        is_upload = headers.get(b"content-type", b"").lower().startswith(b"multipart/")
+
+        # 업로드는 로그인한 사용자만 쓴다. FastAPI는 인증을 확인하기 전에 multipart 본문을 통째로 받아 두므로,
+        # 토큰이 아예 없는 요청은 본문을 받기 전에 여기서 끊는다(익명으로 12MB를 계속 밀어 넣는 것 방지).
+        if is_upload and not headers.get(b"authorization"):
+            await self._reject(send, 401, "Not authenticated")
+            return
+
+        limit = self.max_bytes if is_upload else min(self.max_bytes, MAX_JSON_BYTES)
         declared = headers.get(b"content-length")
         if declared is not None:
             try:
-                too_big = int(declared) > self.max_bytes
+                too_big = int(declared) > limit
             except ValueError:
                 too_big = True
             if too_big:
@@ -42,7 +52,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > limit:
                     rejected = True
                     # 앱에는 연결이 끊긴 것으로 알려 더 읽지 않게 한다
                     return {"type": "http.disconnect"}
@@ -65,11 +75,11 @@ class BodySizeLimitMiddleware:
             await self._reject(send)
 
     @staticmethod
-    async def _reject(send):
-        body = json.dumps({"detail": "요청이 너무 큽니다"}, ensure_ascii=False).encode()
+    async def _reject(send, status: int = 413, detail: str = "요청이 너무 큽니다"):
+        body = json.dumps({"detail": detail}, ensure_ascii=False).encode()
         await send({
             "type": "http.response.start",
-            "status": 413,
+            "status": status,
             "headers": [(b"content-type", b"application/json; charset=utf-8"),
                         (b"content-length", str(len(body)).encode())],
         })

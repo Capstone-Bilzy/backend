@@ -11,6 +11,7 @@
 그 밖에 본문 크기(스트리밍 중 초과 즉시 중단), 픽셀 수(압축 폭탄), 프레임 수를 제한한다.
 """
 
+import asyncio
 from io import BytesIO
 import logging
 
@@ -21,15 +22,23 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 _ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
+# Pillow가 시도할 디코더도 이 셋으로 한정한다(다른 형식의 파서는 아예 실행하지 않는다).
+_DECODERS = ["JPEG", "PNG", "WEBP"]
 
 MAX_FILE_SIZE = 10 * 1024 * 1024   # 업로드 본문 10MB
-MAX_PIXELS = 40_000_000            # 디코딩 전 가로×세로 상한(작은 파일이 거대한 비트맵으로 풀리는 압축 폭탄 차단)
+# 디코딩 전 가로×세로 상한(작은 파일이 거대한 비트맵으로 풀리는 압축 폭탄 차단). 디코딩하면 화소당 3~4바이트에
+# 변환용 복사본까지 생기므로, 메모리가 512MB인 서버에서 한 장으로 죽지 않게 1,600만 화소로 잡는다
+# (앱은 긴 변 2,400px로 줄여 보내므로 정상 사용은 400만 화소 안팎).
+MAX_PIXELS = 16_000_000
 MAX_SIDE = 3000                    # 저장본의 긴 변(px) — 영수증 글자 읽기에 충분
 SANITIZED_MIME = "image/jpeg"
 _READ_CHUNK = 256 * 1024
 
 # Pillow 자체 안전장치도 같은 기준으로 맞춘다(이 값의 2배를 넘으면 Pillow가 예외를 던진다).
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+
+# 동시에 디코딩하는 이미지 수 제한 — 여러 장이 한꺼번에 들어와 메모리를 다 쓰는 것을 막는다.
+_DECODE_SLOTS = asyncio.Semaphore(2)
 
 _INVALID = HTTPException(status_code=400, detail="유효한 이미지 파일이 아닙니다")
 
@@ -51,14 +60,16 @@ async def read_upload(file: UploadFile) -> bytes:
         chunks.append(chunk)
     if size == 0:
         raise _INVALID
-    return sanitize_image(b"".join(chunks))
+    # 디코딩·재인코딩은 CPU 작업이라 이벤트 루프에서 돌리면 그동안 서버 전체가 멈춘다 → 스레드로 넘긴다.
+    async with _DECODE_SLOTS:
+        return await asyncio.to_thread(sanitize_image, b"".join(chunks))
 
 
 def sanitize_image(contents: bytes) -> bytes:
     """실제 이미지인지 확인하고 메타데이터 없는 새 JPEG으로 다시 인코딩한다. 아니면 400."""
     try:
         # 1) 구조 검사 — verify()는 픽셀을 풀지 않고 파일 구조만 확인하며, 호출 뒤에는 객체를 다시 열어야 한다.
-        probe = Image.open(BytesIO(contents))
+        probe = Image.open(BytesIO(contents), formats=_DECODERS)
         fmt = (probe.format or "").upper()
         width, height = probe.size
         frames = getattr(probe, "n_frames", 1)
@@ -78,7 +89,7 @@ def sanitize_image(contents: bytes) -> bytes:
 
     try:
         # 2) 실제 디코딩 — 여기서 깨진/위조된 픽셀 데이터가 걸러진다.
-        img = Image.open(BytesIO(contents))
+        img = Image.open(BytesIO(contents), formats=_DECODERS)
         if fmt == "JPEG":
             img.draft("RGB", (MAX_SIDE, MAX_SIDE))  # 큰 JPEG은 줄인 크기로 바로 디코딩(메모리 절약)
         img = ImageOps.exif_transpose(img)           # 메타데이터를 지우기 전에 촬영 방향을 픽셀에 반영

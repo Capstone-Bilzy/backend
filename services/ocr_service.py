@@ -5,7 +5,7 @@ from fastapi import HTTPException, UploadFile
 from core.database import supabase_admin
 from core.config import settings
 from core import gemini
-from core.storage import signed_receipt_url
+from core.storage import signed_receipt_url, remove_receipt_file
 from core.image_validation import read_upload, SANITIZED_MIME
 import uuid, json
 import logging
@@ -113,17 +113,6 @@ def _fix_amount_read_as_unit_price(result: dict):
     logger.info("OCR_AMOUNT_COLUMN_FIXED 금액 열을 단가로 읽은 결과를 합계 기준으로 보정")
 
 
-async def scan_only(file: UploadFile) -> dict:
-    """정산방과 무관한 독립 OCR. 보관함 저장 전 금액 프리필용으로 items/total만 반환(저장 없음)."""
-    # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
-    # (위장 파일·폴리글랏·EXIF 위치정보 차단 — core/image_validation.py).
-    contents = await read_upload(file)
-
-    ocr_result = await scan_with_gemini(contents, SANITIZED_MIME)
-    total = ocr_result.get("total", sum(item_total(i) for i in ocr_result.get("items", [])))
-    return {"items": ocr_result.get("items", []), "total": total}
-
-
 def _check_settlement_owner(settlement_id: str, user_id: str) -> dict:
     settlement = supabase_admin.table("settlements") \
         .select("id, status").eq("id", settlement_id).eq("created_by", user_id).execute()
@@ -170,6 +159,15 @@ def item_total(item: dict) -> int:
     return int(line_amount) if line_amount is not None else int(item["price"]) * int(item["quantity"])
 
 
+def _ensure_round_allowed(settlement_id: str, round: int):
+    """이미 있는 차수이거나 마지막 차수 바로 다음 번호일 때만 통과시킨다(_get_or_create_receipt와 같은 규칙)."""
+    rounds = supabase_admin.table("receipts") \
+        .select("round").eq("settlement_id", settlement_id).execute()
+    existing = {r["round"] for r in rounds.data}
+    if round not in existing and round > max(existing, default=0) + 1:
+        raise HTTPException(status_code=400, detail="앞 차수 영수증을 먼저 등록해주세요")
+
+
 def _recompute_settlement_total(settlement_id: str):
     """모든 라운드(receipts) 합계를 settlements.total_amount에 반영한다."""
     receipts = supabase_admin.table("receipts") \
@@ -182,6 +180,9 @@ def _recompute_settlement_total(settlement_id: str):
 async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user_id: str) -> dict:
     # 1. 정산방 소유자 확인 (IDOR 방어) — 권한 없는 요청은 이미지를 디코딩하기 전에 끊는다
     _check_editable_owner(settlement_id, user_id)
+    # 만들 수 없는 차수(건너뛴 번호)는 AI를 부르기 전에 거절한다 — 예전엔 인식·업로드를 다 한 뒤에야 400이 나서
+    # 실패할 요청이 Gemini 한도를 쓰고 저장소에 주인 없는 사진을 남겼다.
+    _ensure_round_allowed(settlement_id, round)
 
     # 2. 입력 검증
     # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
@@ -205,8 +206,16 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user
     )
 
     # 5. 이 라운드의 receipts row에 OCR 결과 반영
-    total = ocr_result.get("total", sum(item_total(i) for i in ocr_result.get("items", [])))
+    # 총액은 모델이 준 값이 아니라 품목 합으로 서버가 계산한다(확정 때와 같은 기준, 이상한 값 유입 차단).
+    total = sum(item_total(i) for i in ocr_result.get("items", []))
     receipt = _get_or_create_receipt(settlement_id, round)
+    # 같은 차수를 다시 찍은 경우 이전 사진은 지운다(안 그러면 아무도 가리키지 않는 사진이 남는다).
+    previous_image = receipt.get("receipt_image_url")
+    if previous_image and previous_image != file_path:
+        try:
+            remove_receipt_file(previous_image)
+        except Exception as e:
+            logger.error(f"Previous receipt image remove failed for {settlement_id} round={round}: {e}")
     supabase_admin.table("receipts").update({
         "receipt_image_url": file_path,
         "total_amount": total,

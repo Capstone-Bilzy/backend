@@ -1,7 +1,7 @@
 import httpx
 from fastapi import HTTPException
 from core.database import supabase_admin
-from core.security import create_access_token, create_refresh_token
+from core.security import create_access_token, create_refresh_token, invalidate_user_cache
 from core.privacy import encrypt_user, decrypt_user, pseudonymize, encrypt
 import logging
 from datetime import datetime
@@ -173,3 +173,4 @@ async def refresh_token(refresh_token: str) -> dict:
 async def logout(user_id: str):
     # Refresh token 삭제
     supabase_admin.table("refresh_tokens").delete().eq("user_id", user_id).execute()
+    invalidate_user_cache(user_id)  # 인증 캐시(30초)에 남은 사용자 정보도 바로 지운다

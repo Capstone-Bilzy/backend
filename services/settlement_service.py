@@ -1,6 +1,6 @@
 from fastapi import HTTPException
 from core.database import supabase_admin
-from core.storage import signed_receipt_url, remove_settlement_files
+from core.storage import signed_receipt_url, remove_settlement_files, remove_receipt_file
 from core.privacy import decrypt
 from core.access_logger import log_access
 import logging
@@ -252,9 +252,7 @@ async def delete_receipt_image(settlement_id: str, round: int, user_id: str):
     path = receipt.data[0].get("receipt_image_url")
     if path:
         try:
-            # receipt_image_url은 버킷 내 경로(receipts/{id}/{round}/{uuid}.jpg). split은 풀 URL 형태도 방어.
-            key = path.split("/receipts/")[-1]
-            supabase_admin.storage.from_("receipts").remove([f"receipts/{key}"])
+            remove_receipt_file(path)
         except Exception as e:
             logger.error(f"Receipt image remove failed for {settlement_id} round={round}: {e}")
 
@@ -286,8 +284,7 @@ async def delete_round(settlement_id: str, round: int, user_id: str) -> dict:
     path = target.get("receipt_image_url")
     if path:
         try:
-            key = path.split("/receipts/")[-1]
-            supabase_admin.storage.from_("receipts").remove([f"receipts/{key}"])
+            remove_receipt_file(path)
         except Exception as e:
             logger.error(f"Receipt image remove failed for {settlement_id} round={round}: {e}")
 
@@ -370,7 +367,14 @@ async def set_member_round_adjustment(settlement_id: str, user_id: str, round: i
     if round not in _existing_rounds(settlement_id):
         raise HTTPException(status_code=404, detail="해당 차수의 영수증이 없습니다")
 
-    names = [str(n)[:50] for n in excluded_item_names][:100]
+    # 그 차수 영수증에 실제로 있는 품목 이름만 받는다. 아무 문자열이나 저장되게 두면 AI 프롬프트에
+    # 그대로 들어가 지시문을 심는 통로가 된다(앱은 화면에 보이는 품목 중에서만 고른다).
+    receipt_rows = supabase_admin.table("receipts") \
+        .select("id").eq("settlement_id", settlement_id).eq("round", round).execute()
+    item_rows = supabase_admin.table("receipt_items") \
+        .select("name").eq("receipt_id", receipt_rows.data[0]["id"]).execute() if receipt_rows.data else None
+    real_names = {i["name"] for i in (item_rows.data if item_rows else [])}
+    names = [n for n in dict.fromkeys(str(x) for x in excluded_item_names) if n in real_names][:100]
 
     existing = supabase_admin.table("settlement_member_rounds") \
         .select("id").eq("settlement_member_id", member_id).eq("round", round).execute()
@@ -509,7 +513,8 @@ async def add_member(
 
 
 async def remove_member(settlement_id: str, member_user_id: str, requester_id: str):
-    _check_owner(settlement_id, requester_id)
+    # 계산이 시작된 뒤 멤버를 빼면 남은 사람들의 금액 합이 총액과 어긋나므로 막는다.
+    ensure_not_locked(_check_owner(settlement_id, requester_id))
 
     supabase_admin.table("settlement_members") \
         .delete().eq("settlement_id", settlement_id).eq("user_id", member_user_id).execute()

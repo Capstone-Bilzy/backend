@@ -73,8 +73,15 @@ def calculate_without_ai(rounds_payload: list) -> dict:
     }
 
 
+def _has_special_notes(rounds_payload: list, ai_note: str) -> bool:
+    """정산에 반영할 특이사항이 있는지 — 누군가 "안 먹은 메뉴"를 골랐거나 자유 문장 메모가 있는 경우."""
+    if (ai_note or "").strip():
+        return True
+    return any(p.get("excluded_items") for r in rounds_payload for p in r["participants"])
+
+
 class _SkipAI(Exception):
-    """특이사항이 없어 AI 없이 규칙 계산으로 바로 가는 경우의 내부 신호."""
+    """특이사항이 하나도 없어 AI 없이 규칙 계산으로 바로 가는 경우의 내부 신호."""
 
 
 def _round_sum_mismatch(result: dict, rounds_payload: list) -> list:
@@ -244,10 +251,9 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 
     used_fallback = False
     try:
-        # 자유 문장 특이사항(ai_note)이 없으면 답이 규칙 계산 하나로 정해지므로 AI를 부르지 않는다.
-        # (안 먹은 메뉴·참여 차수는 이미 구조화된 값으로 들어와 규칙 계산이 그대로 반영한다.)
-        # AI는 사람이 글로 적은 특이사항을 해석해야 할 때만 쓴다 — 계산이 즉시 끝나고 한도도 아낀다.
-        if not (ai_note or "").strip():
+        # 특이사항이 하나도 없으면(아무도 안 먹은 메뉴를 고르지 않았고 자유 문장 메모도 없음) 그냥 균등 분배라
+        # AI를 부르지 않고 규칙 계산으로 끝낸다. 특이사항이 있으면 AI가 계산한다(사용자 결정, 2026-10-07).
+        if not _has_special_notes(rounds_payload, ai_note):
             raise _SkipAI()
         # 동기 SDK 호출을 스레드로 넘겨, 계산이 도는 동안에도 서버가 다른 요청(멤버들의 상태 조회 등)을 받게 한다.
         response = await asyncio.to_thread(
@@ -295,6 +301,13 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
     # 결과를 settlement_member_rounds/settlement_members에 저장 — AI/프롬프트 인젝션이 낳을 수 있는
     # 음수·과대 금액, 정체불명 닉네임, 미참여 라운드 배정을 막기 위해 서버에서 검증 후 저장한다.
     member_by_nick = {m["nickname"]: m for m in members.data}
+    # 화면에 보이는 '사유' 문구는 AI가 쓴 글을 저장하지 않고 서버가 만든 것을 쓴다. AI 문구는 닉네임이나
+    # 제외 항목 이름에 심은 지시문을 그대로 옮겨 적을 수 있어(다른 멤버 화면에 임의 문장 노출) 신뢰하지 않는다.
+    rule_result = calculate_without_ai(rounds_payload)
+    rule_reason = {
+        (r["round"], row["nickname"]): row["reason"] for r in rule_result["rounds"] for row in r["results"]
+    }
+    rule_total_reason = {row["nickname"]: row["reason"] for row in rule_result["results"]}
     round_total_by_round = {r["round"]: (r["total_amount"] or 0) for r in receipts}
     participants_by_round = {
         r["round"]: {p["nickname"] for p in next(rp for rp in rounds_payload if rp["round"] == r["round"])["participants"]}
@@ -320,7 +333,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
             except (TypeError, ValueError):
                 amount = 0
             amount = max(0, min(amount, round_cap))
-            reason = str(r.get("reason", ""))[:200]
+            reason = rule_reason.get((round_no, nick), "")[:200]
             supabase_admin.table("settlement_member_rounds").upsert({
                 "settlement_member_id": member["id"],
                 "round": round_no,
@@ -331,9 +344,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
 
     # 최종(전체 라운드 합산) 금액 — AI가 준 합산값보다, 방금 검증·저장한 라운드별 합을 신뢰한다.
     cap = max(int(s.get("total_amount") or 0), 0) or 10_000_000
-    top_level_reason_by_nick = {
-        r.get("nickname"): str(r.get("reason", ""))[:200] for r in result.get("results", []) if r.get("nickname") in member_by_nick
-    }
+    top_level_reason_by_nick = {nick: reason[:200] for nick, reason in rule_total_reason.items()}
     for member in members.data:
         amount = max(0, min(round_amounts_by_member.get(member["id"], 0), cap))
         reason = top_level_reason_by_nick.get(member["nickname"], "")

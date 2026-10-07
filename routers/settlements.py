@@ -173,9 +173,11 @@ async def adjust_amount(
 
     # 방장만 조정 가능
     settlement = supabase_admin.table("settlements") \
-        .select("id").eq("id", settlement_id).eq("created_by", current_user["id"]).execute()
+        .select("id, status").eq("id", settlement_id).eq("created_by", current_user["id"]).execute()
     if not settlement.data:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    # 계산이 시작된 뒤에는 금액을 손으로 바꿀 수 없다(차수별 금액과 어긋나고, 완료된 정산이 바뀐다).
+    settlement_service.ensure_not_locked(settlement.data[0])
 
     result = supabase_admin.table("settlement_members").update({
         "amount": body.amount

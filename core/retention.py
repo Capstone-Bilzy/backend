@@ -7,6 +7,7 @@
 
 from datetime import datetime, timedelta
 from core.database import supabase_admin
+from core.storage import remove_receipt_file
 import logging
 
 logger = logging.getLogger(__name__)
@@ -60,8 +61,7 @@ async def purge_old_receipts():
     count = 0
     for r in old.data or []:
         try:
-            path = r["receipt_image_url"].split("/receipts/")[-1]
-            supabase_admin.storage.from_("receipts").remove([f"receipts/{path}"])
+            remove_receipt_file(r["receipt_image_url"])
             supabase_admin.table("receipts").update(
                 {"receipt_image_url": None}
             ).eq("id", r["id"]).execute()

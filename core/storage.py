@@ -68,3 +68,19 @@ def remove_settlement_files(settlement_id: str) -> int:
         bucket.remove(paths)
     return len(paths)
 
+
+def remove_receipt_file(stored: str | None) -> bool:
+    """DB에 저장된 값(in-bucket 경로 또는 예전 URL) 하나에 해당하는 파일을 지운다. 지웠으면 True.
+
+    예전 삭제 코드는 `stored.split("/receipts/")[-1]` 뒤에 `receipts/`를 다시 붙였는데, 저장값이
+    `receipts/...`(앞에 `/` 없음)라 split이 아무것도 자르지 못해 `receipts/receipts/...`라는 없는 경로를
+    지우려 했다 — 오류 없이 조용히 실패해서 탈퇴·차수 삭제·보관 기간 파기에서 사진이 남았다.
+    """
+    path = _to_inbucket_path(stored)
+    if not path:
+        return False
+    removed = supabase_admin.storage.from_(BUCKET).remove([path])
+    if not removed:
+        logger.warning(f"receipt file not removed (already gone?): {path!r}")
+    return bool(removed)
+
