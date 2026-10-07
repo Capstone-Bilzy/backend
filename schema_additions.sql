@@ -4,21 +4,9 @@ alter table users
   add column if not exists account_number text,   -- AES-256 암호화 저장
   add column if not exists account_holder text;
 
--- ② 영수증 저장 테이블 추가
-create table if not exists saved_receipts (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid references users(id) on delete cascade,
-  image_url text not null,
-  file_path text not null,
-  created_at timestamptz default now()
-);
-
-create index if not exists on saved_receipts(user_id);
-
--- ②-1 저장 영수증에 OCR/수동확인 메타데이터 컬럼 추가 (가게명·총액). nullable — 기존 행 호환.
-alter table saved_receipts
-  add column if not exists store_name text,
-  add column if not exists total_amount integer;
+-- ② (삭제됨) 영수증 보관함 테이블 saved_receipts
+--    보관함 기능을 없애면서 2026-10-07에 API·데이터·테이블을 모두 지웠다. 새 DB에는 만들지 않는다.
+--    이미 만들어진 DB에서 지우려면: drop table if exists saved_receipts;
 
 -- ③ consent_logs - 약관 항목 세분화
 -- (기존 테이블 그대로 사용, consent_type 값만 추가)
