@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, conint, constr
+from pydantic import BaseModel, Field, conint, constr, field_validator
 from typing import Optional, List
 from enum import Enum
 from core.ids import UUID_PATTERN
@@ -72,6 +72,18 @@ class UpdateStatusRequest(BaseModel):
 
 class SetMemberCapacityRequest(BaseModel):
     member_capacity: conint(gt=0, le=100)
+
+class RenameExtraPhotoRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=30)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("이름을 입력해주세요")
+        return v
+
 
 class AddMemberRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=20)

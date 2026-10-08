@@ -124,10 +124,16 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
 
     # 순수 기록용 첨부 사진 — 라운드/정산 계산과 무관(attach-photo로 추가된 것)
     extra_photos_result = supabase_admin.table("settlement_extra_photos") \
-        .select("image_url, created_at").eq("settlement_id", settlement_id) \
+        .select("*").eq("settlement_id", settlement_id) \
         .order("created_at", desc=False).execute()
+    # name 컬럼은 schema_extra_photo_name.sql 적용 전 DB에는 없을 수 있어 get으로 읽는다
     extra_photos = [
-        {"image_url": signed_receipt_url(p["image_url"]), "created_at": p["created_at"]}
+        {
+            "id": p["id"],
+            "name": p.get("name"),
+            "image_url": signed_receipt_url(p["image_url"]),
+            "created_at": p["created_at"],
+        }
         for p in extra_photos_result.data
     ]
 
@@ -140,6 +146,20 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
         "extra_photos": extra_photos,
         "payer_account": await _payer_account(settlement, user_id),
     }
+
+
+async def rename_extra_photo(settlement_id: str, photo_id: str, name: str, user_id: str) -> dict:
+    """첨부한 영수증 사진의 이름 변경 — 방장 전용(사진 첨부와 같은 권한). 정산 계산과 무관해 완료된 방에서도 된다."""
+    owned = supabase_admin.table("settlements") \
+        .select("id").eq("id", settlement_id).eq("created_by", user_id).execute()
+    if not owned.data:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    # settlement_id까지 같이 걸어 다른 정산방의 사진 id로는 바꿀 수 없게 한다
+    result = supabase_admin.table("settlement_extra_photos") \
+        .update({"name": name}).eq("id", photo_id).eq("settlement_id", settlement_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="사진을 찾을 수 없습니다")
+    return {"id": photo_id, "name": name}
 
 
 async def _payer_account(settlement: dict, requester_id: str) -> dict | None:

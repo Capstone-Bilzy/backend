@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, Response, Request, Query, Path
 from models.schemas import (
     CreateSettlementRequest, UpdateSettlementRequest, UpdateStatusRequest, AddMemberRequest,
-    CalculateRequest, SetMemberRoundsRequest, SetRoundAdjustmentRequest, SetMemberCapacityRequest
+    CalculateRequest, SetMemberRoundsRequest, SetRoundAdjustmentRequest, SetMemberCapacityRequest,
+    RenameExtraPhotoRequest
 )
 from services import settlement_service, ai_service, qr_service
 from core.security import get_current_user
@@ -38,6 +39,16 @@ async def set_capacity(
 ):
     """PeopleCount 화면에서 방장이 정한 정원 저장 — 이후 join이 이 값을 넘지 못하게 막는다."""
     return await settlement_service.set_member_capacity(settlement_id, body.member_capacity, current_user["id"])
+
+
+@router.patch("/{settlement_id}/extra-photos/{photo_id}")
+@limiter.limit("30/minute")
+async def rename_extra_photo(
+    request: Request, settlement_id: str, photo_id: str, body: RenameExtraPhotoRequest,
+    current_user=Depends(get_current_user)
+):
+    """첨부한 영수증 사진 이름 변경 — 방장 전용(정산내역 상세의 ⋯ 메뉴)."""
+    return await settlement_service.rename_extra_photo(settlement_id, photo_id, body.name, current_user["id"])
 
 
 @router.delete("/{settlement_id}")
