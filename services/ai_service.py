@@ -80,6 +80,36 @@ def _has_special_notes(rounds_payload: list, ai_note: str) -> bool:
     return any(p.get("excluded_items") for r in rounds_payload for p in r["participants"])
 
 
+def _ai_calc_allowed(user_id: str) -> bool:
+    """오늘(한국 시간) 이 사용자가 AI 계산을 더 불러도 되는지. 되면 이번 호출을 기록한다.
+
+    영수증 인식과 같은 Gemini 한도를 쓰는데 인식에만 하루 제한이 있어서, 계산을 반복해 한도를 다 쓸 수 있었다.
+    넘었거나 확인에 실패하면 False — 호출 측은 오류 대신 규칙 계산으로 끝낸다.
+    """
+    limit = settings.AI_CALC_DAILY_LIMIT_PER_USER
+    if limit <= 0:
+        return True
+    from datetime import datetime, timedelta, timezone
+    kst = timezone(timedelta(hours=9))
+    day_start = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0) \
+        .astimezone(timezone.utc).replace(tzinfo=None)
+    try:
+        used = supabase_admin.table("access_logs").select("id", count="exact") \
+            .eq("user_id", user_id).eq("resource", "ai_calc") \
+            .gte("created_at", day_start.isoformat()).execute().count or 0
+        if used >= limit:
+            logger.info(f"AI_CALC_DAILY_LIMIT user={user_id[:8]}*** used={used}")
+            return False
+        supabase_admin.table("access_logs").insert({
+            "user_id": user_id, "action": "CREATE", "resource": "ai_calc",
+            "created_at": datetime.utcnow().isoformat(),
+        }).execute()
+        return True
+    except Exception as e:
+        logger.error(f"AI calc quota check failed: {e}")
+        return False
+
+
 class _SkipAI(Exception):
     """특이사항이 하나도 없어 AI 없이 규칙 계산으로 바로 가는 경우의 내부 신호."""
 
@@ -149,6 +179,10 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
         .select("*").eq("id", settlement_id).eq("created_by", user_id).execute()
     if not settlement.data:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+
+    # 앱에는 자유 문장 입력란이 없어 ai_note는 항상 빈 값으로 온다. API로 아무 글자나 넣으면 매번 AI를 부르게
+    # 만들 수 있었으므로 받은 값은 쓰지 않는다(특이사항은 구조화된 "안 먹은 메뉴"만 본다).
+    ai_note = ""
 
     s = settlement.data[0]
     if s.get("status") == "done":
@@ -255,7 +289,7 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
     try:
         # 특이사항이 하나도 없으면(아무도 안 먹은 메뉴를 고르지 않았고 자유 문장 메모도 없음) 그냥 균등 분배라
         # AI를 부르지 않고 규칙 계산으로 끝낸다. 특이사항이 있으면 AI가 계산한다(사용자 결정, 2026-10-07).
-        if not _has_special_notes(rounds_payload, ai_note):
+        if not _has_special_notes(rounds_payload, ai_note) or not _ai_calc_allowed(user_id):
             raise _SkipAI()
         # 동기 SDK 호출을 스레드로 넘겨, 계산이 도는 동안에도 서버가 다른 요청(멤버들의 상태 조회 등)을 받게 한다.
         response = await asyncio.to_thread(

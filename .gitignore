@@ -220,3 +220,6 @@ __marimo__/
 
 # macOS 폴더 설정 파일
 .DS_Store
+
+# 로컬 도구 설정
+.claude/

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # 한 사람이 하루(한국 시간)에 영수증 인식(Gemini)을 부를 수 있는 횟수. 무료 한도를 한 명이 다 쓰는 걸 막는다.
     # 0이면 제한 없음. 넘으면 429 — 앱은 인식 실패 화면에서 직접 입력으로 이어갈 수 있다.
     OCR_DAILY_LIMIT_PER_USER: int = 10
+    # 한 사람이 하루(한국 시간)에 정산 계산에서 AI(Gemini)를 부를 수 있는 횟수. 넘으면 오류 없이 규칙 계산으로 끝낸다
+    # (AI 결과는 어차피 규칙 계산과 같아야 통과한다). 0이면 제한 없음.
+    AI_CALC_DAILY_LIMIT_PER_USER: int = 20
     NAVER_CLIENT_ID: str
     NAVER_CLIENT_SECRET: str
 

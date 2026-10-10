@@ -97,7 +97,8 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
         .select("*").eq("settlement_id", settlement_id).order("joined_at").order("id").execute()
 
     # 참여자 프로필 이미지 - users 테이블과 조인 (N+1 방지 위해 in_ 필터로 한 번에 조회)
-    user_ids = list({m["user_id"] for m in members.data})
+    # 탈퇴한 사람의 행은 user_id가 비어 있다(계산이 끝난 방에서는 금액을 지키려고 행을 남긴다)
+    user_ids = list({m["user_id"] for m in members.data if m["user_id"]})
     users_result = supabase_admin.table("users") \
         .select("id, profile_image_url").in_("id", user_ids).execute() if user_ids else None
     image_by_user = {
@@ -591,7 +592,7 @@ async def mark_done(settlement_id: str, user_id: str) -> dict:
     history_rows = []
     for m in members.data:
         uid = m["user_id"]
-        if uid not in seen:
+        if uid and uid not in seen:  # 탈퇴한 사람의 행은 user_id가 비어 있다
             seen.add(uid)
             history_rows.append({"settlement_id": settlement_id, "user_id": uid})
 

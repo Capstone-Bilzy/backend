@@ -1,5 +1,5 @@
 from fastapi import HTTPException, Request
-from core.storage import remove_settlement_files
+from core.storage import remove_settlement_files, remove_receipt_file
 from core.security import invalidate_user_cache
 from core.database import supabase_admin
 from core.privacy import encrypt, decrypt, decrypt_user
@@ -7,6 +7,9 @@ from core.access_logger import log_access
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 계산이 끝난 방에 남기는 탈퇴자 행의 표시 이름
+WITHDRAWN_NICKNAME = "탈퇴한 사용자"
 
 
 async def get_profile(user_id: str, request: Request = None) -> dict:
@@ -71,6 +74,32 @@ async def delete_account(user_id: str):
         supabase_admin.table("settlements") \
             .delete().eq("created_by", user_id).execute()
 
+    # 남의 방에 올린 첨부 사진: 행은 users 삭제 때 같이 지워지지만 파일은 따로 지워야 한다(예전엔 버킷에 남았다).
+    my_photos = supabase_admin.table("settlement_extra_photos") \
+        .select("id, image_url").eq("uploaded_by", user_id).execute()
+    for p in my_photos.data or []:
+        try:
+            remove_receipt_file(p["image_url"])
+        except Exception as e:
+            logger.error(f"Account delete: extra photo remove failed {p['id']}: {e}")
+    supabase_admin.table("settlement_extra_photos").delete().eq("uploaded_by", user_id).execute()
+
+    # 남의 방 멤버 행: 계산이 시작된 방에서 행을 지우면 남은 사람들의 금액 합이 총액과 안 맞게 된다.
+    # 그런 방에서는 금액은 두고 사람 정보(계정 연결·이름)만 지운다. 계산 전인 방에서는 행째 지운다.
+    from services.settlement_service import LOCKED_STATUSES, _dedupe_nickname
+    memberships = supabase_admin.table("settlement_members") \
+        .select("id, settlement_id").eq("user_id", user_id).execute()
+    joined_ids = [m["settlement_id"] for m in memberships.data or []]
+    locked_ids = set()
+    if joined_ids:
+        rooms = supabase_admin.table("settlements").select("id, status").in_("id", joined_ids).execute()
+        locked_ids = {r["id"] for r in rooms.data or [] if r["status"] in LOCKED_STATUSES}
+    for m in memberships.data or []:
+        if m["settlement_id"] in locked_ids:
+            supabase_admin.table("settlement_members").update({
+                "user_id": None,
+                "nickname": _dedupe_nickname(m["settlement_id"], WITHDRAWN_NICKNAME, exclude_member_id=m["id"]),
+            }).eq("id", m["id"]).execute()
     supabase_admin.table("settlement_members").delete().eq("user_id", user_id).execute()
     supabase_admin.table("history").delete().eq("user_id", user_id).execute()
     supabase_admin.table("refresh_tokens").delete().eq("user_id", user_id).execute()

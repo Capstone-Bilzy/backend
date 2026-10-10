@@ -69,5 +69,16 @@ async def purge_old_receipts():
         except Exception as e:
             logger.error(f"Receipt purge failed for {r['id']}: {e}")
 
+    # 추가로 첨부한 사진도 같은 기준으로 지운다(예전엔 차수별 영수증만 대상이라 첨부 사진은 계속 남았다).
+    extras = supabase_admin.table("settlement_extra_photos") \
+        .select("id, image_url").in_("settlement_id", settlement_ids).execute()
+    for p in extras.data or []:
+        try:
+            remove_receipt_file(p["image_url"])
+            supabase_admin.table("settlement_extra_photos").delete().eq("id", p["id"]).execute()
+            count += 1
+        except Exception as e:
+            logger.error(f"Extra photo purge failed for {p['id']}: {e}")
+
     logger.info(f"RETENTION: 영수증 이미지 {count}건 파기 완료")
     return count
