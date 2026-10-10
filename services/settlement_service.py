@@ -92,9 +92,9 @@ def _load_member_rounds(member_ids: list) -> dict:
 async def get_settlement(settlement_id: str, user_id: str) -> dict:
     settlement = _check_member(settlement_id, user_id)
 
-    # 참여자 목록
+    # 참여자 목록 — 입장 순서로 고정(정산 계산 ai_service와 같은 순서여야 앱 미리보기의 1원 배정이 결과와 같다)
     members = supabase_admin.table("settlement_members") \
-        .select("*").eq("settlement_id", settlement_id).execute()
+        .select("*").eq("settlement_id", settlement_id).order("joined_at").order("id").execute()
 
     # 참여자 프로필 이미지 - users 테이블과 조인 (N+1 방지 위해 in_ 필터로 한 번에 조회)
     user_ids = list({m["user_id"] for m in members.data})

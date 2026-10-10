@@ -158,8 +158,10 @@ async def calculate_split(settlement_id: str, ai_note: str, user_id: str) -> dic
     receipts = _load_receipts_with_items(settlement_id)
 
     # 참여자 조회
+    # 입장 순서로 고정한다 — 1원 나머지를 누가 받는지가 이 순서로 정해지고, 앱의 금액 조정 미리보기도
+    # get_settlement이 주는 같은 순서로 계산한다(정렬이 없으면 행이 수정될 때마다 순서가 바뀔 수 있다).
     members = supabase_admin.table("settlement_members") \
-        .select("*").eq("settlement_id", settlement_id).execute()
+        .select("*").eq("settlement_id", settlement_id).order("joined_at").order("id").execute()
 
     if not receipts or not any(r["items"] for r in receipts):
         raise HTTPException(status_code=400, detail="영수증 항목이 없습니다")
