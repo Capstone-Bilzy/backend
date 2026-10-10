@@ -131,6 +131,7 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
         {
             "id": p["id"],
             "name": p.get("name"),
+            "uploaded_by": p.get("uploaded_by"),
             "image_url": signed_receipt_url(p["image_url"]),
             "created_at": p["created_at"],
         }
@@ -149,16 +150,17 @@ async def get_settlement(settlement_id: str, user_id: str) -> dict:
 
 
 async def rename_extra_photo(settlement_id: str, photo_id: str, name: str, user_id: str) -> dict:
-    """첨부한 영수증 사진의 이름 변경 — 방장 전용(사진 첨부와 같은 권한). 정산 계산과 무관해 완료된 방에서도 된다."""
-    owned = supabase_admin.table("settlements") \
-        .select("id").eq("id", settlement_id).eq("created_by", user_id).execute()
-    if not owned.data:
-        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    """첨부한 영수증 사진의 이름 변경 — 방장이거나 그 사진을 올린 사람만. 정산 계산과 무관해 완료된 방에서도 된다."""
+    settlement = _check_member(settlement_id, user_id)
     # settlement_id까지 같이 걸어 다른 정산방의 사진 id로는 바꿀 수 없게 한다
-    result = supabase_admin.table("settlement_extra_photos") \
-        .update({"name": name}).eq("id", photo_id).eq("settlement_id", settlement_id).execute()
-    if not result.data:
+    photo = supabase_admin.table("settlement_extra_photos") \
+        .select("id, uploaded_by").eq("id", photo_id).eq("settlement_id", settlement_id).execute()
+    if not photo.data:
         raise HTTPException(status_code=404, detail="사진을 찾을 수 없습니다")
+    if settlement["created_by"] != user_id and photo.data[0].get("uploaded_by") != user_id:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다")
+    supabase_admin.table("settlement_extra_photos") \
+        .update({"name": name}).eq("id", photo_id).eq("settlement_id", settlement_id).execute()
     return {"id": photo_id, "name": name}
 
 
@@ -225,10 +227,13 @@ async def set_member_capacity(settlement_id: str, member_capacity: int, user_id:
     ensure_not_locked(_check_owner(settlement_id, user_id))
 
     # 이미 들어와 있는 인원보다 적게는 못 줄인다(정원 2명인 방에 3명이 있는 상태가 생기지 않게).
+    # 방장은 초대 화면에서 입장하기 전까지 멤버가 아니므로, 아직 안 들어왔으면 방장 자리 1개를 더 센다
+    # (안 그러면 참여자 2명 + 정원 2로 줄인 뒤 방장이 들어와 3명이 된다).
     joined = supabase_admin.table("settlement_members") \
-        .select("id", count="exact").eq("settlement_id", settlement_id).execute()
-    if (joined.count or 0) > member_capacity:
-        raise HTTPException(status_code=400, detail=f"이미 {joined.count}명이 참여 중이에요")
+        .select("user_id").eq("settlement_id", settlement_id).execute().data
+    taken = len(joined) + (0 if any(m["user_id"] == user_id for m in joined) else 1)
+    if taken > member_capacity:
+        raise HTTPException(status_code=400, detail=f"이미 {taken}명이 참여 중이에요")
 
     result = supabase_admin.table("settlements") \
         .update({"member_capacity": member_capacity}).eq("id", settlement_id).execute()

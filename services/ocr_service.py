@@ -379,8 +379,10 @@ async def add_item(settlement_id: str, round: int, name: str, price: int, quanti
 async def attach_receipt_photo(settlement_id: str, file: UploadFile, user_id: str) -> dict:
     """정산방에 영수증 사진만 순수 기록용으로 첨부한다(OCR·금액 계산 없음).
     receipts(라운드)와 무관한 별도 테이블에 저장 — 정산 계산·참여자 몫에 전혀 영향을 주지 않는다."""
-    # 권한 없는 요청은 이미지를 디코딩하기 전에 끊는다
-    _check_settlement_owner(settlement_id, user_id)
+    # 방장과 참여자 모두 첨부할 수 있다(정산 내역 화면의 "영수증 사진 추가하기"는 참여자에게도 보인다).
+    # 권한 없는 요청은 이미지를 디코딩하기 전에 끊는다.
+    from services.settlement_service import _check_member
+    _check_member(settlement_id, user_id)
 
     # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다
     # (위장 파일·폴리글랏·EXIF 위치정보 차단 — core/image_validation.py).
