@@ -224,6 +224,12 @@ async def set_member_capacity(settlement_id: str, member_capacity: int, user_id:
     """방장이 정원(총 인원)을 설정 — 이후 join이 이 값을 초과하지 못하게 막는다(add_member)."""
     ensure_not_locked(_check_owner(settlement_id, user_id))
 
+    # 이미 들어와 있는 인원보다 적게는 못 줄인다(정원 2명인 방에 3명이 있는 상태가 생기지 않게).
+    joined = supabase_admin.table("settlement_members") \
+        .select("id", count="exact").eq("settlement_id", settlement_id).execute()
+    if (joined.count or 0) > member_capacity:
+        raise HTTPException(status_code=400, detail=f"이미 {joined.count}명이 참여 중이에요")
+
     result = supabase_admin.table("settlements") \
         .update({"member_capacity": member_capacity}).eq("id", settlement_id).execute()
     return result.data[0]
@@ -528,8 +534,26 @@ async def add_member(
         "nickname": _dedupe_nickname(settlement_id, nickname),
         "amount": 0
     }).execute()
+    member = result.data[0]
 
-    return result.data[0]
+    # 정원 확인과 추가 사이에 다른 사람이 동시에 들어오면 둘 다 통과할 수 있다. 넣은 뒤 다시 세어
+    # 정원을 넘겼고 내가 넘친 쪽(방장이 아니고, 정원 순번 밖)이면 방금 넣은 행을 되돌린다.
+    capacity = settlement_row.get("member_capacity")
+    if capacity is not None and not is_owner:
+        rows = supabase_admin.table("settlement_members") \
+            .select("id, user_id, joined_at").eq("settlement_id", settlement_id) \
+            .order("joined_at").order("id").execute().data
+        guests = [m for m in rows if m["user_id"] != settlement_row["created_by"]]
+        if len(rows) > capacity or len(guests) > capacity - 1:
+            allowed = {m["id"] for m in guests[:max(capacity - 1, 0)]}
+            if member["id"] not in allowed:
+                supabase_admin.table("settlement_members").delete().eq("id", member["id"]).execute()
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error_code": "SETTLEMENT_FULL", "message": "정원이 다 찼어요"}
+                )
+
+    return member
 
 
 async def remove_member(settlement_id: str, member_user_id: str, requester_id: str):

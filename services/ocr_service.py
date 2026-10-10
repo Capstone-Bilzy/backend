@@ -168,6 +168,41 @@ def _ensure_round_allowed(settlement_id: str, round: int):
         raise HTTPException(status_code=400, detail="앞 차수 영수증을 먼저 등록해주세요")
 
 
+def _check_daily_scan_quota(user_id: str):
+    """하루 인식 횟수 제한. 오늘(한국 시간) 이 사용자의 인식 기록을 access_logs에서 세고, 통과하면 이번 것을 기록한다.
+
+    세는 것과 기록 사이가 원자적이지 않아 동시에 여러 장을 올리면 한두 번 더 통과할 수 있다(무료 한도 보호용이라 충분).
+    기록·조회가 실패하면 인식을 막지 않는다.
+    """
+    limit = settings.OCR_DAILY_LIMIT_PER_USER
+    if limit <= 0:
+        return
+    from datetime import datetime, timedelta, timezone
+    kst = timezone(timedelta(hours=9))
+    day_start = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0) \
+        .astimezone(timezone.utc).replace(tzinfo=None)
+    try:
+        used = supabase_admin.table("access_logs").select("id", count="exact") \
+            .eq("user_id", user_id).eq("resource", "ocr_scan") \
+            .gte("created_at", day_start.isoformat()).execute().count or 0
+    except Exception as e:
+        logger.error(f"OCR quota check failed: {e}")
+        return
+    if used >= limit:
+        logger.info(f"OCR_DAILY_LIMIT user={user_id[:8]}*** used={used}")
+        raise HTTPException(
+            status_code=429,
+            detail=f"오늘 영수증 인식은 {limit}번까지 할 수 있어요. 직접 입력을 이용해주세요"
+        )
+    try:
+        supabase_admin.table("access_logs").insert({
+            "user_id": user_id, "action": "CREATE", "resource": "ocr_scan",
+            "created_at": datetime.utcnow().isoformat(),
+        }).execute()
+    except Exception as e:
+        logger.error(f"OCR quota log failed: {e}")
+
+
 def _recompute_settlement_total(settlement_id: str):
     """모든 라운드(receipts) 합계를 settlements.total_amount에 반영한다."""
     receipts = supabase_admin.table("receipts") \
@@ -183,6 +218,7 @@ async def upload_and_scan(file: UploadFile, settlement_id: str, round: int, user
     # 만들 수 없는 차수(건너뛴 번호)는 AI를 부르기 전에 거절한다 — 예전엔 인식·업로드를 다 한 뒤에야 400이 나서
     # 실패할 요청이 Gemini 한도를 쓰고 저장소에 주인 없는 사진을 남겼다.
     _ensure_round_allowed(settlement_id, round)
+    _check_daily_scan_quota(user_id)
 
     # 2. 입력 검증
     # 크기 제한 안에서 읽고, 실제 이미지로 디코딩해 메타데이터 없는 새 JPEG으로 다시 만든 바이트만 쓴다

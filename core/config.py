@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # 카카오 개발자 콘솔의 숫자 앱 ID(비밀 값 아님). 로그인에 쓰인 카카오 토큰이 이 앱에서 발급된 것인지 확인한다.
     # 0으로 두면 확인을 건너뛴다(문제가 생겼을 때 환경변수 KAKAO_APP_ID=0 으로 바로 끌 수 있게).
     KAKAO_APP_ID: int = 1468714
+    # 한 사람이 하루(한국 시간)에 영수증 인식(Gemini)을 부를 수 있는 횟수. 무료 한도를 한 명이 다 쓰는 걸 막는다.
+    # 0이면 제한 없음. 넘으면 429 — 앱은 인식 실패 화면에서 직접 입력으로 이어갈 수 있다.
+    OCR_DAILY_LIMIT_PER_USER: int = 10
     NAVER_CLIENT_ID: str
     NAVER_CLIENT_SECRET: str
 
